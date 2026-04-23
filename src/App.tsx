@@ -768,11 +768,11 @@ function DonateModal({
     <div className="modal-backdrop" role="dialog" aria-modal="true" aria-label="打赏提示">
       <div className="modal-card donate-card">
         <button className="modal-close" onClick={onClose} aria-label="关闭">×</button>
-        <span className="modal-kicker">生成次数已用完</span>
-        <h2>开发不易，经验无价</h2>
-        <p>每个人的收入水平有差异，但心意同价。如觉得有价值，可根据个人情况打赏。</p>
+        <span className="modal-kicker">免费次数已用完</span>
+        <h2>添加管理员，咨询解锁后续使用</h2>
+        <p>如需继续生成商业诊断，请扫码添加管理员。管理员会协助开通后续使用权限，也可以为你提供项目诊断和工具使用建议。</p>
         <div className="qr-box">
-          <img src="/donate-qr.jpg" alt="微信收款二维码" />
+          <img src="/donate-qr.jpg" alt="管理员微信二维码" />
         </div>
         <div className="redeem-form">
           <label htmlFor="redeem-code">已有兑换码</label>
