@@ -65,19 +65,19 @@ const progressSteps = ["读取剧本", "提取商业卖点", "评估留存与付
 const generationLimit = 2;
 const generationCountKey = "xingchi-ai-diagnosis-count";
 const generationUnlockKey = "xingchi-ai-diagnosis-unlocked";
-const redeemCodes = new Set(["XINGCHI2026", "HZP2026", "XCAI888"]);
+const visitorIdKey = "xingchi-ai-visitor-id";
 const diagnoseApiEndpoint =
   window.location.hostname === "localhost" || window.location.hostname === "127.0.0.1"
     ? "http://localhost:8787/api/diagnose"
     : "/api/diagnose";
-
-function normalizeRedeemCode(code: string) {
-  return code.trim().replace(/\s+/g, "").toUpperCase();
-}
-
-function isRedeemCodeValid(code: string) {
-  return redeemCodes.has(normalizeRedeemCode(code));
-}
+const redeemApiEndpoint =
+  window.location.hostname === "localhost" || window.location.hostname === "127.0.0.1"
+    ? "http://localhost:8787/api/redeem"
+    : "/api/redeem";
+const visitApiEndpoint =
+  window.location.hostname === "localhost" || window.location.hostname === "127.0.0.1"
+    ? "http://localhost:8787/api/track-visit"
+    : "/api/track-visit";
 
 function createMockReport(form: FormState): DiagnosisReport {
   const script = form.scriptText.trim();
@@ -184,6 +184,16 @@ function inferTitle(form: FormState) {
   return firstHeading?.trim() || "";
 }
 
+function getVisitorId() {
+  const existing = window.localStorage.getItem(visitorIdKey);
+  if (existing) return existing;
+  const next = typeof crypto !== "undefined" && "randomUUID" in crypto
+    ? crypto.randomUUID()
+    : `${Date.now()}-${Math.random().toString(16).slice(2)}`;
+  window.localStorage.setItem(visitorIdKey, next);
+  return next;
+}
+
 function App() {
   const [view, setView] = useState<View>("diagnose");
   const [form, setForm] = useState<FormState>(initialForm);
@@ -203,6 +213,15 @@ function App() {
     }, 280);
     return () => window.clearInterval(timer);
   }, [isAnalyzing]);
+
+  useEffect(() => {
+    const visitorId = getVisitorId();
+    fetch(visitApiEndpoint, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ visitorId }),
+    }).catch(() => undefined);
+  }, []);
 
   const activeStep = useMemo(() => {
     if (progress < 25) return 0;
@@ -294,12 +313,19 @@ function App() {
     }
   };
 
-  const redeemAccess = (code: string) => {
-    if (!isRedeemCodeValid(code)) return false;
+  const redeemAccess = async (code: string) => {
+    const response = await fetch(redeemApiEndpoint, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ code }),
+    });
+    const result = await response.json().catch(() => ({}));
+    if (!response.ok || !result.ok) {
+      throw new Error(result.error || "兑换码无效，请检查后重新输入。");
+    }
     window.localStorage.setItem(generationUnlockKey, "true");
     window.localStorage.removeItem(generationCountKey);
     setDonateOpen(false);
-    return true;
   };
 
   const exportReport = () => {
@@ -751,17 +777,24 @@ function DonateModal({
   onRedeem,
 }: {
   onClose: () => void;
-  onRedeem: (code: string) => boolean;
+  onRedeem: (code: string) => Promise<void>;
 }) {
   const [code, setCode] = useState("");
   const [redeemMessage, setRedeemMessage] = useState("");
+  const [isRedeeming, setIsRedeeming] = useState(false);
 
-  const submitCode = () => {
-    if (onRedeem(code)) {
+  const submitCode = async () => {
+    setIsRedeeming(true);
+    setRedeemMessage("");
+    try {
+      await onRedeem(code);
       setRedeemMessage("兑换成功，可以继续生成。");
-      return;
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "兑换码无效，请检查后重新输入。";
+      setRedeemMessage(message);
+    } finally {
+      setIsRedeeming(false);
     }
-    setRedeemMessage("兑换码无效，请检查后重新输入。");
   };
 
   return (
@@ -786,7 +819,9 @@ function DonateModal({
               }}
               placeholder="输入兑换码继续使用"
             />
-            <button className="button secondary" onClick={submitCode}>兑换</button>
+            <button className="button secondary" onClick={submitCode} disabled={isRedeeming}>
+              {isRedeeming ? "兑换中" : "兑换"}
+            </button>
           </div>
           {redeemMessage && (
             <span className={redeemMessage.includes("成功") ? "redeem-message success" : "redeem-message error"}>

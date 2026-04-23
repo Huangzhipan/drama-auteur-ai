@@ -1,8 +1,13 @@
 import http from "node:http";
-import { readFileSync, existsSync } from "node:fs";
+import crypto from "node:crypto";
+import { mkdirSync, readFileSync, existsSync, writeFileSync } from "node:fs";
+import { dirname, resolve } from "node:path";
 
 const PORT = Number(process.env.API_PORT || 8787);
 const HOST = process.env.API_HOST || "0.0.0.0";
+const ADMIN_DATA_FILE = resolve(process.env.ADMIN_DATA_FILE || "./data/admin.json");
+const ADMIN_SESSION_TTL_MS = 1000 * 60 * 60 * 12;
+const activeAdminSessions = new Map();
 
 loadEnv();
 
@@ -32,6 +37,72 @@ const server = http.createServer(async (req, res) => {
   if (req.method === "GET" && req.url === "/health") {
     writeJson(res, 200, { ok: true, hasGeminiKey: Boolean(process.env.GEMINI_API_KEY) });
     return;
+  }
+
+  if (req.method === "POST" && req.url === "/api/track-visit") {
+    try {
+      const body = await readJson(req);
+      recordVisit(req, body);
+      writeJson(res, 200, { ok: true });
+    } catch {
+      writeJson(res, 200, { ok: true });
+    }
+    return;
+  }
+
+  if (req.method === "POST" && req.url === "/api/redeem") {
+    try {
+      const body = await readJson(req);
+      const result = redeemCode(String(body.code || ""));
+      writeJson(res, result.ok ? 200 : 400, result);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "兑换失败";
+      writeJson(res, 400, { ok: false, error: message });
+    }
+    return;
+  }
+
+  if (req.method === "POST" && req.url === "/admin-api/login") {
+    try {
+      const body = await readJson(req);
+      if (String(body.username || "") !== "admin" || String(body.password || "") !== getAdminPassword()) {
+        writeJson(res, 401, { ok: false, error: "账号或密码错误" });
+        return;
+      }
+      const token = createAdminSession();
+      writeJson(res, 200, { ok: true, token });
+    } catch {
+      writeJson(res, 400, { ok: false, error: "登录失败" });
+    }
+    return;
+  }
+
+  if (req.url?.startsWith("/admin-api/")) {
+    if (!isAdminRequest(req)) {
+      writeJson(res, 401, { ok: false, error: "请先登录" });
+      return;
+    }
+
+    if (req.method === "GET" && req.url === "/admin-api/summary") {
+      const store = readAdminStore();
+      writeJson(res, 200, buildAdminSummary(store));
+      return;
+    }
+
+    if (req.method === "POST" && req.url === "/admin-api/codes") {
+      try {
+        const body = await readJson(req);
+        const days = clampInt(body.days, 1, 365, 30);
+        const count = clampInt(body.count, 1, 100, 1);
+        const label = String(body.label || "").trim().slice(0, 80);
+        const codes = createRedeemCodes({ days, count, label });
+        writeJson(res, 200, { ok: true, codes });
+      } catch (error) {
+        const message = error instanceof Error ? error.message : "生成失败";
+        writeJson(res, 400, { ok: false, error: message });
+      }
+      return;
+    }
   }
 
   if (req.method === "POST" && req.url === "/api/diagnose") {
@@ -68,7 +139,7 @@ server.listen(PORT, HOST, () => {
 function setCors(res) {
   res.setHeader("Access-Control-Allow-Origin", "*");
   res.setHeader("Access-Control-Allow-Methods", "GET,POST,OPTIONS");
-  res.setHeader("Access-Control-Allow-Headers", "Content-Type");
+  res.setHeader("Access-Control-Allow-Headers", "Content-Type,Authorization");
 }
 
 function writeJson(res, status, data) {
@@ -95,6 +166,155 @@ function readJson(req) {
     });
     req.on("error", reject);
   });
+}
+
+function getAdminPassword() {
+  return process.env.ADMIN_PASSWORD || "change-me-now";
+}
+
+function createAdminSession() {
+  const token = crypto.randomBytes(32).toString("hex");
+  activeAdminSessions.set(token, Date.now() + ADMIN_SESSION_TTL_MS);
+  return token;
+}
+
+function isAdminRequest(req) {
+  const token = String(req.headers.authorization || "").replace(/^Bearer\s+/i, "");
+  const expiresAt = activeAdminSessions.get(token);
+  if (!expiresAt || expiresAt < Date.now()) {
+    activeAdminSessions.delete(token);
+    return false;
+  }
+  activeAdminSessions.set(token, Date.now() + ADMIN_SESSION_TTL_MS);
+  return true;
+}
+
+function readAdminStore() {
+  if (!existsSync(ADMIN_DATA_FILE)) {
+    return { codes: [], visits: {}, events: [] };
+  }
+  try {
+    const parsed = JSON.parse(readFileSync(ADMIN_DATA_FILE, "utf8"));
+    return {
+      codes: Array.isArray(parsed.codes) ? parsed.codes : [],
+      visits: parsed.visits && typeof parsed.visits === "object" ? parsed.visits : {},
+      events: Array.isArray(parsed.events) ? parsed.events : [],
+    };
+  } catch {
+    return { codes: [], visits: {}, events: [] };
+  }
+}
+
+function writeAdminStore(store) {
+  mkdirSync(dirname(ADMIN_DATA_FILE), { recursive: true });
+  writeFileSync(ADMIN_DATA_FILE, JSON.stringify(store, null, 2));
+}
+
+function todayKey(offset = 0) {
+  const date = new Date(Date.now() + offset * 86400000);
+  const parts = new Intl.DateTimeFormat("zh-CN", {
+    timeZone: "Asia/Shanghai",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  }).formatToParts(date);
+  const get = (type) => parts.find((part) => part.type === type)?.value || "";
+  return `${get("year")}-${get("month")}-${get("day")}`;
+}
+
+function getClientFingerprint(req, body = {}) {
+  const forwarded = String(req.headers["x-forwarded-for"] || "").split(",")[0].trim();
+  const ip = forwarded || req.socket.remoteAddress || "";
+  const ua = String(req.headers["user-agent"] || "");
+  const visitorId = String(body.visitorId || "").slice(0, 160);
+  return crypto.createHash("sha256").update(`${visitorId}|${ip}|${ua}`).digest("hex");
+}
+
+function recordVisit(req, body) {
+  const store = readAdminStore();
+  const day = todayKey();
+  const fingerprint = getClientFingerprint(req, body);
+  if (!store.visits[day]) store.visits[day] = {};
+  store.visits[day][fingerprint] = Date.now();
+  writeAdminStore(store);
+}
+
+function createRedeemCodes({ days, count, label }) {
+  const store = readAdminStore();
+  const now = Date.now();
+  const expiresAt = now + days * 86400000;
+  const created = Array.from({ length: count }, () => ({
+    code: randomCode(),
+    label,
+    createdAt: now,
+    expiresAt,
+    redeemedAt: null,
+    status: "active",
+  }));
+  store.codes.unshift(...created);
+  writeAdminStore(store);
+  return created;
+}
+
+function redeemCode(rawCode) {
+  const code = normalizeCode(rawCode);
+  if (!code) return { ok: false, error: "请输入兑换码" };
+  const store = readAdminStore();
+  const item = store.codes.find((entry) => normalizeCode(entry.code) === code);
+  if (!item) return { ok: false, error: "兑换码不存在" };
+  if (item.status !== "active") return { ok: false, error: "兑换码不可用" };
+  if (item.redeemedAt) return { ok: false, error: "兑换码已被使用" };
+  if (Number(item.expiresAt || 0) < Date.now()) return { ok: false, error: "兑换码已过期" };
+  item.redeemedAt = Date.now();
+  item.status = "redeemed";
+  store.events.unshift({ type: "redeem", code: item.code, at: item.redeemedAt });
+  store.events = store.events.slice(0, 300);
+  writeAdminStore(store);
+  return { ok: true, code: item.code, expiresAt: item.expiresAt };
+}
+
+function buildAdminSummary(store) {
+  const days = Array.from({ length: 14 }, (_, index) => todayKey(-index)).map((day) => ({
+    day,
+    visitors: Object.keys(store.visits[day] || {}).length,
+  }));
+  const codes = store.codes.map((item) => ({
+    code: item.code,
+    label: item.label || "",
+    createdAt: item.createdAt,
+    expiresAt: item.expiresAt,
+    redeemedAt: item.redeemedAt || null,
+    status: Number(item.expiresAt || 0) < Date.now() && !item.redeemedAt ? "expired" : item.status,
+  }));
+  return {
+    ok: true,
+    todayVisitors: days[0]?.visitors || 0,
+    totalCodes: codes.length,
+    activeCodes: codes.filter((item) => item.status === "active").length,
+    redeemedCodes: codes.filter((item) => item.status === "redeemed").length,
+    days,
+    codes: codes.slice(0, 200),
+  };
+}
+
+function normalizeCode(code) {
+  return String(code || "").trim().replace(/\s+/g, "").toUpperCase();
+}
+
+function randomCode() {
+  const alphabet = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
+  let result = "XC-";
+  for (let i = 0; i < 10; i += 1) {
+    result += alphabet[Math.floor(Math.random() * alphabet.length)];
+    if (i === 4) result += "-";
+  }
+  return result;
+}
+
+function clampInt(value, min, max, fallback) {
+  const number = Number.parseInt(String(value), 10);
+  if (!Number.isFinite(number)) return fallback;
+  return Math.max(min, Math.min(max, number));
 }
 
 async function diagnoseWithGemini(input) {
