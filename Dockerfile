@@ -3,6 +3,7 @@ FROM node:20-slim
 WORKDIR /app
 
 COPY server.mjs ./
+COPY public ./public
 
 ENV API_HOST=0.0.0.0
 ENV API_PORT=8080

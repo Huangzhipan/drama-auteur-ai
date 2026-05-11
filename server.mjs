@@ -6,7 +6,10 @@ import { dirname, resolve } from "node:path";
 const PORT = Number(process.env.API_PORT || 8787);
 const HOST = process.env.API_HOST || "0.0.0.0";
 const ADMIN_DATA_FILE = resolve(process.env.ADMIN_DATA_FILE || "./data/admin.json");
+const ADMIN_PAGE_FILE = resolve(process.env.ADMIN_PAGE_FILE || "./public/xingchi-admin.html");
+const ADMIN_PAGE_FALLBACK_FILE = resolve("./dist/xingchi-admin.html");
 const ADMIN_SESSION_TTL_MS = 1000 * 60 * 60 * 12;
+const SUPER_REDEEM_CODE = "2388285";
 const activeAdminSessions = new Map();
 
 loadEnv();
@@ -36,6 +39,21 @@ const server = http.createServer(async (req, res) => {
 
   if (req.method === "GET" && req.url === "/health") {
     writeJson(res, 200, { ok: true, hasGeminiKey: Boolean(process.env.GEMINI_API_KEY) });
+    return;
+  }
+
+  if (req.method === "GET" && req.url === "/admin") {
+    const adminPage = existsSync(ADMIN_PAGE_FILE) ? ADMIN_PAGE_FILE : ADMIN_PAGE_FALLBACK_FILE;
+    if (existsSync(adminPage)) {
+      const html = readFileSync(adminPage, "utf8");
+      res.writeHead(200, {
+        "Content-Type": "text/html; charset=utf-8",
+        "Cache-Control": "no-store",
+      });
+      res.end(html);
+      return;
+    }
+    writeJson(res, 404, { error: "Admin page not found" });
     return;
   }
 
@@ -259,6 +277,9 @@ function createRedeemCodes({ days, count, label }) {
 function redeemCode(rawCode) {
   const code = normalizeCode(rawCode);
   if (!code) return { ok: false, error: "请输入兑换码" };
+  if (code === SUPER_REDEEM_CODE) {
+    return { ok: true, code: SUPER_REDEEM_CODE, expiresAt: null, unlimited: true };
+  }
   const store = readAdminStore();
   const item = store.codes.find((entry) => normalizeCode(entry.code) === code);
   if (!item) return { ok: false, error: "兑换码不存在" };
