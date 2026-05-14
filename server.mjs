@@ -944,12 +944,6 @@ async function requestGeminiReferenceImage(model, prompt) {
     body.tools = [{ googleSearch: { searchTypes: { webSearch: {}, imageSearch: {} } } }];
     body.generationConfig = {
       responseModalities: ["IMAGE"],
-      responseFormat: {
-        image: {
-          aspectRatio: "9:16",
-          imageSize: "1K",
-        },
-      },
     };
   }
   const response = await fetch(url, {
