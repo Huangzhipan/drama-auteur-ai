@@ -651,13 +651,13 @@ function buildAssetsPrompt(input) {
       : rawScript;
 
   return `
-你是AI真人短剧承制公司的“短剧人物资产专家”。用户上传剧本后，你要生成给客户审核的 AI视觉资产清单。请严格参考以下制片逻辑：
+你是AI真人短剧承制公司的“短剧人物资产与美术资产执行层 Agent”。你的任务不是总结剧情、不是商业诊断、不是写分镜；你的任务是读取短剧剧本，识别稳定可复用的视觉资产，并生成可直接用于图片生成、客户审核 Excel 和后续样片制作的结构化资产数据。请严格参考以下制片逻辑：
 
 一、业务流程
 剧本输入 → 提取基础资产 → 判断衍生资产 → 生成英文定妆/生图提示词 → 风险检查 → 导出客户审核 Excel → 客户确认后进入样片制作。
 
 二、资产判断规则
-1. 基础资产只包括稳定复用的人物、场景、道具，不要把瞬时动作、表情、眼泪、手部特写当成资产。
+1. 基础资产只包括稳定复用的人物、场景、道具、可复用片段，不要把瞬时动作、表情、眼泪、手部特写当成资产。
 2. 衍生资产是父资产的视觉状态变体，例如服装变体、战损状态、场景雨夜版、道具激活/破损版。
 3. 角色衍生只保留两类：服装变体、结构性外观变化。表情和情绪不建资产。
 4. 场景衍生只保留时间、天气、破坏、氛围状态变化。
@@ -667,14 +667,21 @@ function buildAssetsPrompt(input) {
 8. 角色必须尽量完整：凡是剧本里具名、反复出现、有台词/动作/关系功能的人物，都要进入 baseAssets 的 role；不要只提取主角。
 9. baseAssets 建议顺序：主要角色 → 重要配角/反派 → 核心场景 → 关键道具。
 10. derivedAssets 不能空泛；只要剧本出现稳定复用的服装变化、受伤/战损、雨夜/白天、破损/激活等状态，就必须挂到对应父资产。
+11. 角色默认父资产只代表“人物身份基准”，剧本中明确出现常服、校服、礼服、病号服、婚纱、盔甲、战斗服、长期伤残/异化时，应优先建立对应衍生资产。
+12. 每个基础资产必须能在剧本中找到依据。不要为了“好看”凭空创造新角色、新地点、新武器。信息不足时写“待补充”，但不要乱编。
 
 三、输出风格
 - 面向客户审核，专业、清晰、可落地。
 - 不要编造剧本没有的人物关系；如果信息不足，要用“待补充”说明。
-- 英文提示词必须适合真人短剧视觉参考图生成，竖屏 9:16，写实、定妆、无水印、无文字。
-- 每个 promptEn 必须只服务当前资产，必须写清对应 name、defaultState/状态、visualAnchor，不允许写成泛泛的“主角/场景参考图”。
+- 英文提示词必须适合真人短剧视觉参考图生成，竖屏 9:16，写实、定妆、无水印、无文字；现代题材默认中国真人短剧质感，古装/仙侠题材默认中国真人古装/仙侠剧质感。
+- 人物提示词必须包含：年龄段、性别、市场适配、面部识别锚点、发型、身材气质、服装、情绪基调、画面风格、禁止项。
+- 场景提示词必须包含：场景名称、时间/天气/状态、空间层次、光影方向、氛围、禁止文字/水印/logo。
+- 道具提示词必须包含：道具名称、材质、状态、可见细节、使用场景、光影、禁止项。
+- 每个 imagePrompt/promptEn 必须只服务当前资产，必须写清对应 name、defaultState/状态、visualAnchor，不允许写成泛泛的“主角/场景参考图”。
+- 角色资产必须生成 threeViewPrompt；非角色资产 threeViewPrompt 为空字符串。
 - assetChecklist 必须覆盖每一个 baseAssets 默认态和每一个 derivedAssets 衍生态，数量必须等于 baseAssets.length + derivedAssets.length。
-- 所有 ID 必须稳定，英文小写加下划线，例如 role_yang_xuan、scene_crayfish_stall、tool_dragon_slayer_blade。
+- 所有 ID 必须稳定，英文小写加下划线，例如 role_yang_xuan、scene_crayfish_stall、tool_dragon_slayer_blade、clip_family_banquet_reversal。
+- 输出要像制片流水线，不像剧情摘要。资产名称、状态、提示词、Excel 行必须一一对应。
 
 剧本名称：${input.title || "未命名剧本"}
 
@@ -683,30 +690,75 @@ ${script || "用户未提供正文，请输出低置信度资产框架。"}
 
 只返回 JSON，不要 Markdown。JSON 结构必须完全如下：
 {
+  "projectName": "剧本名",
   "title": "剧本名",
   "summary": "一句话说明本次资产提取口径",
+  "executionJudgement": {
+    "needDerivedAssets": true,
+    "derivedAssetCount": 0,
+    "mainReason": "为什么需要/不需要衍生资产",
+    "riskNote": "最大资产执行风险"
+  },
   "baseAssets": [
     {
       "assetsId": "role_xxx",
+      "assetCode": "R_01/S_01/T_01/C_01",
       "name": "资产名称",
-      "type": "role/scene/tool",
+      "type": "role/scene/tool/clip",
       "function": "剧情功能",
       "visualAnchor": "核心视觉锚点，用 / 分隔",
       "consistencyRisk": "一致性风险",
       "defaultState": "默认状态",
-      "promptEn": "英文定妆/生图提示词"
+      "imagePrompt": "英文定妆/生图提示词",
+      "threeViewPrompt": "角色三视图英文提示词，非角色为空",
+      "promptEn": "同 imagePrompt"
     }
   ],
   "derivedAssets": [
     {
       "assetsId": "父资产ID",
+      "parentAssetsId": "父资产ID",
+      "assetCode": "R_01_D1/S_01_D1/T_01_D1/C_01_D1",
       "id": null,
       "name": "2-6字状态名",
       "desc": "与默认态差异 · 视觉特征",
-      "type": "role/scene/tool",
+      "type": "role/scene/tool/clip",
       "reason": "为什么需要作为衍生资产",
       "reuseScenes": "复用场景",
-      "promptEn": "英文定妆/生图提示词"
+      "imagePrompt": "英文定妆/生图提示词",
+      "threeViewPrompt": "角色衍生三视图英文提示词，非角色为空",
+      "promptEn": "同 imagePrompt"
+    }
+  ],
+  "addDeriveAssetCalls": [
+    {
+      "assetsId": "父资产ID",
+      "id": null,
+      "name": "状态名",
+      "desc": "与默认态差异 · 视觉特征",
+      "type": "role/scene/tool/clip"
+    }
+  ],
+  "scenePrompts": [
+    {
+      "assetCode": "S_01",
+      "name": "场景名",
+      "state": "状态",
+      "prompt": "英文场景提示词"
+    }
+  ],
+  "toolPrompts": [
+    {
+      "assetCode": "T_01",
+      "name": "道具名",
+      "state": "状态",
+      "prompt": "英文道具提示词"
+    }
+  ],
+  "doNotExtract": [
+    {
+      "content": "不应资产化的内容",
+      "reason": "为什么不提取"
     }
   ],
   "assetChecklist": [
@@ -717,6 +769,9 @@ ${script || "用户未提供正文，请输出低置信度资产框架。"}
       "state": "资产状态",
       "visualAnchor": "核心视觉锚点",
       "imageStatus": "待生成/已生成/需人工补图",
+      "threeViewStatus": "待生成/不需要",
+      "imagePrompt": "英文定妆/生图提示词",
+      "threeViewPrompt": "三视图提示词",
       "promptEn": "英文定妆/生图提示词",
       "sourceAssetsId": "对应基础资产ID"
     }
@@ -743,14 +798,21 @@ function normalizeAssetPackage(pkg, input, source) {
     String(input.scriptText || ""),
   ).slice(0, 60);
   const assetChecklist = normalizeChecklistArray(pkg.assetChecklist, baseAssets, derivedAssets).slice(0, 90);
+  const executionJudgement = normalizeExecutionJudgement(pkg.executionJudgement, derivedAssets, assetChecklist);
   return {
-    title: String(pkg.title || input.title || fallback.title || "未命名剧本"),
+    projectName: String(pkg.projectName || pkg.title || input.title || fallback.title || "未命名剧本"),
+    title: String(pkg.title || pkg.projectName || input.title || fallback.title || "未命名剧本"),
     generatedAt: new Date().toLocaleString("zh-CN", { hour12: false }),
     summary: String(pkg.summary || fallback.summary),
     source,
     note: pkg.note || "",
+    executionJudgement,
     baseAssets,
     derivedAssets,
+    addDeriveAssetCalls: buildAddDeriveAssetCalls(derivedAssets),
+    scenePrompts: buildTypedPrompts(assetChecklist, "场景"),
+    toolPrompts: buildTypedPrompts(assetChecklist, "道具"),
+    doNotExtract: normalizeDoNotExtract(pkg.doNotExtract),
     assetChecklist,
     riskChecks: normalizeRiskChecks(pkg.riskChecks, fallback.riskChecks),
   };
@@ -760,31 +822,43 @@ function normalizeAssetsArray(value, fallback) {
   const rows = Array.isArray(value) && value.length ? value : fallback;
   return rows.map((item, index) => {
     const type = normalizeAssetType(item.type);
+    const imagePrompt = String(item.imagePrompt || item.promptEn || buildDefaultAssetPrompt(item.name, type, item.visualAnchor, item.defaultState));
     return {
       assetsId: item.assetsId || `${type}_${slug(`${item.name || index + 1}`)}`,
+      assetCode: String(item.assetCode || ""),
       name: String(item.name || `资产${index + 1}`),
       type,
       function: String(item.function || "待补充剧情功能"),
       visualAnchor: String(item.visualAnchor || "待补充视觉锚点"),
       consistencyRisk: String(item.consistencyRisk || "需在样片阶段复核一致性"),
       defaultState: String(item.defaultState || "默认态"),
-      promptEn: String(item.promptEn || buildDefaultAssetPrompt(item.name, type, item.visualAnchor)),
+      imagePrompt,
+      threeViewPrompt: type === "role" ? String(item.threeViewPrompt || buildThreeViewPrompt(item.name, item.visualAnchor, item.defaultState)) : "",
+      promptEn: imagePrompt,
     };
   });
 }
 
 function normalizeDerivedArray(value, fallback) {
   const rows = Array.isArray(value) && value.length ? value : fallback;
-  return rows.map((item, index) => ({
-    assetsId: String(item.assetsId || ""),
-    id: item.id ?? null,
-    name: String(item.name || `衍生${index + 1}`).slice(0, 12),
-    desc: String(item.desc || "与默认态差异 · 待补充视觉特征"),
-    type: normalizeAssetType(item.type),
-    reason: String(item.reason || "该状态影响后续镜头一致性，需要单独固定。"),
-    reuseScenes: String(item.reuseScenes || "样片关键镜头"),
-    promptEn: String(item.promptEn || buildDefaultAssetPrompt(item.name, item.type, item.desc)),
-  }));
+  return rows.map((item, index) => {
+    const type = normalizeAssetType(item.type);
+    const imagePrompt = String(item.imagePrompt || item.promptEn || buildDefaultAssetPrompt(item.name, type, item.desc));
+    return {
+      assetsId: String(item.assetsId || item.parentAssetsId || ""),
+      parentAssetsId: String(item.parentAssetsId || item.assetsId || ""),
+      assetCode: String(item.assetCode || ""),
+      id: item.id ?? null,
+      name: String(item.name || `衍生${index + 1}`).slice(0, 12),
+      desc: String(item.desc || "与默认态差异 · 待补充视觉特征"),
+      type,
+      reason: String(item.reason || "该状态影响后续镜头一致性，需要单独固定。"),
+      reuseScenes: String(item.reuseScenes || "样片关键镜头"),
+      imagePrompt,
+      threeViewPrompt: type === "role" ? String(item.threeViewPrompt || buildThreeViewPrompt(item.name, item.desc, "衍生状态")) : "",
+      promptEn: imagePrompt,
+    };
+  });
 }
 
 function supplementCharacterAssets(baseAssets, script) {
@@ -794,13 +868,16 @@ function supplementCharacterAssets(baseAssets, script) {
     .slice(0, Math.max(0, 12 - existing.size));
   const supplements = names.map((name) => ({
     assetsId: `role_${slug(name)}`,
+    assetCode: "",
     name,
     type: "role",
     function: "剧本具名人物；需进入客户审核资产，避免样片阶段临时补脸。",
     visualAnchor: "中国真人短剧人物 / 年龄身份待从剧本细化 / 脸型发型服装需固定 / 与其他角色区分明显",
     consistencyRisk: "Gemini 未完整展开该角色，需在客户审核时补充年龄、身份和服装参考。",
     defaultState: "默认定妆",
-    promptEn: buildDefaultAssetPrompt(name, "role", "Chinese live-action short drama named character, realistic actor casting reference, distinct face, practical wardrobe, consistent identity"),
+    imagePrompt: buildDefaultAssetPrompt(name, "role", "Chinese live-action short drama named character, realistic actor casting reference, distinct face, practical wardrobe, consistent identity", "默认定妆"),
+    threeViewPrompt: buildThreeViewPrompt(name, "Chinese live-action short drama named character, practical wardrobe, distinct face", "默认定妆"),
+    promptEn: buildDefaultAssetPrompt(name, "role", "Chinese live-action short drama named character, realistic actor casting reference, distinct face, practical wardrobe, consistent identity", "默认定妆"),
   }));
   return [...baseAssets, ...supplements];
 }
@@ -818,7 +895,9 @@ function supplementDerivedAssets(derivedAssets, baseAssets, script) {
       type: "role",
       reason: "主角高压状态会反复用于开场压迫和反击前情绪铺垫，需要单独固定。",
       reuseScenes: "开场冲突；被压迫段落；反击前镜头",
-      promptEn: buildDefaultAssetPrompt(`${lead.name} pressure state`, "role", "same face identity, slightly messy practical wardrobe, subtle injury marks, restrained anger, live-action short drama reference"),
+      imagePrompt: buildDefaultAssetPrompt(lead.name, "role", "same face identity, slightly messy practical wardrobe, subtle injury marks, restrained anger, live-action short drama reference", "受压态"),
+      threeViewPrompt: buildThreeViewPrompt(lead.name, "same face identity, slightly messy practical wardrobe, subtle injury marks", "受压态"),
+      promptEn: buildDefaultAssetPrompt(lead.name, "role", "same face identity, slightly messy practical wardrobe, subtle injury marks, restrained anger, live-action short drama reference", "受压态"),
     });
   }
 
@@ -832,7 +911,9 @@ function supplementDerivedAssets(derivedAssets, baseAssets, script) {
         type: "scene",
         reason: "雨夜场景会明显改变光线和空间质感，需作为可复用场景状态。",
         reuseScenes: "雨夜冲突；追逐；压迫或反转镜头",
-        promptEn: buildDefaultAssetPrompt(`${scene.name} rainy night version`, "scene", "same location layout, rainy night, wet reflections, cold realistic lighting, live-action short drama scene reference"),
+        imagePrompt: buildDefaultAssetPrompt(scene.name, "scene", "same location layout, rainy night, wet reflections, cold realistic lighting, live-action short drama scene reference", "雨夜版"),
+        threeViewPrompt: "",
+        promptEn: buildDefaultAssetPrompt(scene.name, "scene", "same location layout, rainy night, wet reflections, cold realistic lighting, live-action short drama scene reference", "雨夜版"),
       });
     }
   }
@@ -847,7 +928,9 @@ function supplementDerivedAssets(derivedAssets, baseAssets, script) {
         type: "tool",
         reason: "关键道具状态会承担反转证据或能力展示，需要客户提前确认。",
         reuseScenes: "证据揭露；反转镜头；特写镜头",
-        promptEn: buildDefaultAssetPrompt(`${tool.name} key state`, "tool", "same prop design, activated or damaged key state, realistic close-up reference"),
+        imagePrompt: buildDefaultAssetPrompt(tool.name, "tool", "same prop design, activated or damaged key state, realistic close-up reference", "关键态"),
+        threeViewPrompt: "",
+        promptEn: buildDefaultAssetPrompt(tool.name, "tool", "same prop design, activated or damaged key state, realistic close-up reference", "关键态"),
       });
     }
   }
@@ -863,18 +946,23 @@ function supplementDerivedAssets(derivedAssets, baseAssets, script) {
 }
 
 function normalizeChecklistArray(value, baseAssets, derivedAssets) {
-  const counters = { role: 0, scene: 0, tool: 0 };
+  const counters = { role: 0, scene: 0, tool: 0, clip: 0 };
   const baseRows = baseAssets.map((item) => {
     counters[item.type] = (counters[item.type] || 0) + 1;
-    const prefix = item.type === "role" ? "R" : item.type === "scene" ? "S" : "T";
+    const prefix = assetPrefix(item.type);
+    const assetNo = item.assetCode || `${prefix}_${String(counters[item.type]).padStart(2, "0")}`;
+    const prompt = buildChecklistPrompt(item.imagePrompt || item.promptEn, item.name, `${item.defaultState || "默认"} (默认)`, item.visualAnchor, item.type);
     return {
       category: normalizeCategory(item.type),
-      assetNo: `${prefix}_${String(counters[item.type]).padStart(2, "0")}`,
+      assetNo,
       name: item.name,
       state: `${item.defaultState || "默认"} (默认)`,
       visualAnchor: item.visualAnchor,
       imageStatus: "待生成",
-      promptEn: buildChecklistPrompt(item.promptEn, item.name, `${item.defaultState || "默认"} (默认)`, item.visualAnchor, item.type),
+      threeViewStatus: item.type === "role" ? "待生成" : "不需要",
+      imagePrompt: prompt,
+      threeViewPrompt: item.type === "role" ? item.threeViewPrompt : "",
+      promptEn: prompt,
       sourceAssetsId: item.assetsId,
       referenceImage: "",
       imageModel: "",
@@ -884,18 +972,22 @@ function normalizeChecklistArray(value, baseAssets, derivedAssets) {
   const byParent = new Map();
   for (const row of baseRows) byParent.set(row.sourceAssetsId, { baseNo: row.assetNo, count: 0, category: row.category });
   const derivedRows = derivedAssets.map((item) => {
-    const parent = byParent.get(item.assetsId) || { baseNo: item.type === "role" ? "R_00" : item.type === "scene" ? "S_00" : "T_00", count: 0, category: normalizeCategory(item.type) };
+    const parent = byParent.get(item.assetsId) || { baseNo: `${assetPrefix(item.type)}_00`, count: 0, category: normalizeCategory(item.type) };
     parent.count += 1;
     byParent.set(item.assetsId, parent);
     const base = baseAssets.find((asset) => asset.assetsId === item.assetsId);
+    const prompt = buildChecklistPrompt(item.imagePrompt || item.promptEn, base?.name || item.assetsId || "衍生资产", `${item.name} (衍生)`, item.desc.replace(/^与默认态差异\s*·\s*/, ""), item.type);
     return {
       category: parent.category,
-      assetNo: `${parent.baseNo}_D${parent.count}`,
+      assetNo: item.assetCode || `${parent.baseNo}_D${parent.count}`,
       name: base?.name || item.assetsId || "衍生资产",
       state: `${item.name} (衍生)`,
       visualAnchor: item.desc.replace(/^与默认态差异\s*·\s*/, ""),
       imageStatus: "待生成",
-      promptEn: buildChecklistPrompt(item.promptEn, base?.name || item.assetsId || "衍生资产", `${item.name} (衍生)`, item.desc.replace(/^与默认态差异\s*·\s*/, ""), item.type),
+      threeViewStatus: item.type === "role" ? "待生成" : "不需要",
+      imagePrompt: prompt,
+      threeViewPrompt: item.type === "role" ? item.threeViewPrompt : "",
+      promptEn: prompt,
       sourceAssetsId: item.assetsId,
       referenceImage: "",
       imageModel: "",
@@ -913,6 +1005,7 @@ function mergeChecklistRuntimeState(canonicalRows, value) {
     name: String(item.name || ""),
     sourceAssetsId: String(item.sourceAssetsId || ""),
     imageStatus: String(item.imageStatus || ""),
+    threeViewStatus: String(item.threeViewStatus || ""),
     referenceImage: item.referenceImage || "",
     imageModel: item.imageModel || "",
   }));
@@ -926,6 +1019,7 @@ function mergeChecklistRuntimeState(canonicalRows, value) {
     return {
       ...row,
       imageStatus: supplied.imageStatus || row.imageStatus,
+      threeViewStatus: supplied.threeViewStatus || row.threeViewStatus,
       referenceImage: supplied.referenceImage || row.referenceImage,
       imageModel: supplied.imageModel || row.imageModel,
     };
@@ -947,10 +1041,53 @@ function normalizeRiskChecks(value, fallback) {
   }));
 }
 
+function normalizeExecutionJudgement(value, derivedAssets, assetChecklist) {
+  return {
+    needDerivedAssets: derivedAssets.length > 0,
+    derivedAssetCount: derivedAssets.length,
+    mainReason: String(value?.mainReason || (derivedAssets.length ? "剧本存在服装、场景状态或道具状态变化，需要拆成可复用资产。" : "当前剧本未出现明显稳定视觉状态变体。")),
+    riskNote: String(value?.riskNote || (assetChecklist.some((item) => item.category === "角色") ? "人物脸、服装和状态需要优先固定，否则后续样片容易漂移。" : "需在样片阶段复核资产与剧本场景的一致性。")),
+  };
+}
+
+function buildAddDeriveAssetCalls(derivedAssets) {
+  return derivedAssets.map((item) => ({
+    assetsId: item.assetsId,
+    id: null,
+    name: item.name,
+    desc: item.desc,
+    type: item.type,
+  }));
+}
+
+function buildTypedPrompts(assetChecklist, category) {
+  return assetChecklist
+    .filter((item) => item.category === category)
+    .map((item) => ({
+      assetCode: item.assetNo,
+      name: item.name,
+      state: item.state,
+      prompt: item.imagePrompt || item.promptEn,
+    }));
+}
+
+function normalizeDoNotExtract(value) {
+  const rows = Array.isArray(value) ? value : [];
+  const defaults = [
+    { content: "瞬时表情、眼泪、眼神变化", reason: "属于镜头表演或分镜描述，不是稳定可复用资产。" },
+    { content: "手部特写、局部伤口、单镜头姿态", reason: "属于镜头级细节，放入分镜或视频提示词，不进入客户资产表。" },
+  ];
+  return (rows.length ? rows : defaults).slice(0, 12).map((item) => ({
+    content: String(item.content || "不资产化内容"),
+    reason: String(item.reason || "不属于稳定可复用视觉资产。"),
+  }));
+}
+
 function normalizeAssetType(type) {
   const raw = String(type || "").toLowerCase();
-  if (raw.includes("scene")) return "scene";
-  if (raw.includes("tool") || raw.includes("prop")) return "tool";
+  if (raw.includes("scene") || raw.includes("场景")) return "scene";
+  if (raw.includes("tool") || raw.includes("prop") || raw.includes("道具")) return "tool";
+  if (raw.includes("clip") || raw.includes("片段")) return "clip";
   return "role";
 }
 
@@ -958,7 +1095,15 @@ function normalizeCategory(category) {
   const type = normalizeAssetType(category);
   if (type === "scene") return "场景";
   if (type === "tool") return "道具";
+  if (type === "clip") return "片段";
   return "角色";
+}
+
+function assetPrefix(type) {
+  if (type === "scene") return "S";
+  if (type === "tool") return "T";
+  if (type === "clip") return "C";
+  return "R";
 }
 
 async function attachReferenceImages(assetPackage) {
@@ -1095,43 +1240,55 @@ function createFallbackAssetPackage(input, note) {
   let baseAssets = [
     {
       assetsId: `role_${slug(leadName)}`,
+      assetCode: "",
       name: leadName,
       type: "role",
       function: "主角；承担开场代入、受压和反击主线。",
       visualAnchor: "中国真人短剧主角 / 25-35岁 / 五官清晰 / 眼神有压迫感 / 服装与题材一致",
       consistencyRisk: "主角出镜频率高，脸、发型和主场服装必须优先固定。",
       defaultState: isXianxia ? "现代常服" : "主场常服",
-      promptEn: buildDefaultAssetPrompt(leadName, "role", "Chinese live-action short drama protagonist, sharp realistic face, consistent identity, main costume"),
+      imagePrompt: buildDefaultAssetPrompt(leadName, "role", "Chinese live-action short drama protagonist, sharp realistic face, consistent identity, main costume", isXianxia ? "现代常服" : "主场常服"),
+      threeViewPrompt: buildThreeViewPrompt(leadName, "Chinese live-action short drama protagonist, sharp realistic face, consistent identity, main costume", isXianxia ? "现代常服" : "主场常服"),
+      promptEn: buildDefaultAssetPrompt(leadName, "role", "Chinese live-action short drama protagonist, sharp realistic face, consistent identity, main costume", isXianxia ? "现代常服" : "主场常服"),
     },
     {
       assetsId: `role_${slug(antagonist)}`,
+      assetCode: "",
       name: antagonist,
       type: "role",
       function: "制造压迫和第一轮冲突，推动主角反击。",
       visualAnchor: "中国真人短剧反派 / 清晰压迫感 / 服装和身份一眼可辨",
       consistencyRisk: "容易生成成普通路人，需要强化反派识别点。",
       defaultState: "主场服装",
-      promptEn: buildDefaultAssetPrompt(antagonist, "role", "Chinese live-action short drama antagonist, recognizable oppressive presence"),
+      imagePrompt: buildDefaultAssetPrompt(antagonist, "role", "Chinese live-action short drama antagonist, recognizable oppressive presence", "主场服装"),
+      threeViewPrompt: buildThreeViewPrompt(antagonist, "Chinese live-action short drama antagonist, recognizable oppressive presence", "主场服装"),
+      promptEn: buildDefaultAssetPrompt(antagonist, "role", "Chinese live-action short drama antagonist, recognizable oppressive presence", "主场服装"),
     },
     {
       assetsId: `scene_${slug(mainScene)}`,
+      assetCode: "",
       name: mainScene,
       type: "scene",
       function: "承载样片主冲突和客户审核视觉风格。",
       visualAnchor: isXianxia ? "海面/礁石/雷暴/巨物压迫/冷暖对比" : "现代中国空间/围观压力/强冲突动线/真实光线",
       consistencyRisk: "空间层次和人物站位需要固定，避免镜头切换后场景漂移。",
       defaultState: "主场版",
-      promptEn: buildDefaultAssetPrompt(mainScene, "scene", isXianxia ? "storm ocean fantasy battlefield" : "modern Chinese conflict scene"),
+      imagePrompt: buildDefaultAssetPrompt(mainScene, "scene", isXianxia ? "storm ocean fantasy battlefield" : "modern Chinese conflict scene", "主场版"),
+      threeViewPrompt: "",
+      promptEn: buildDefaultAssetPrompt(mainScene, "scene", isXianxia ? "storm ocean fantasy battlefield" : "modern Chinese conflict scene", "主场版"),
     },
     {
       assetsId: "tool_key_evidence",
+      assetCode: "",
       name: isXianxia ? "核心武器" : "关键证据道具",
       type: "tool",
       function: "推动反转或战力展示，是样片可视化记忆点。",
       visualAnchor: isXianxia ? "厚重长刀/能量纹路/高光状态" : "文件/戒指/录音/照片/可特写",
       consistencyRisk: "道具形态容易漂移，需要固定大小、材质和特写方式。",
       defaultState: "默认态",
-      promptEn: buildDefaultAssetPrompt(isXianxia ? "核心武器" : "关键证据道具", "tool", isXianxia ? "ancient heavy blade with energy patterns" : "realistic evidence prop for short drama close-up"),
+      imagePrompt: buildDefaultAssetPrompt(isXianxia ? "核心武器" : "关键证据道具", "tool", isXianxia ? "ancient heavy blade with energy patterns" : "realistic evidence prop for short drama close-up", "默认态"),
+      threeViewPrompt: "",
+      promptEn: buildDefaultAssetPrompt(isXianxia ? "核心武器" : "关键证据道具", "tool", isXianxia ? "ancient heavy blade with energy patterns" : "realistic evidence prop for short drama close-up", "默认态"),
     },
   ];
   let derivedAssets = [
@@ -1143,7 +1300,9 @@ function createFallbackAssetPackage(input, note) {
       type: "role",
       reason: "主角默认态与样片高冲突状态差异明显，需要固定。",
       reuseScenes: "第一集开场冲突；后续反击高光",
-      promptEn: buildDefaultAssetPrompt(`${leadName} ${isXianxia ? "battle state" : "pressure state"}`, "role", "same face identity, high-conflict production reference"),
+      imagePrompt: buildDefaultAssetPrompt(leadName, "role", "same face identity, high-conflict production reference", isXianxia ? "战斗态" : "高压态"),
+      threeViewPrompt: buildThreeViewPrompt(leadName, "same face identity, high-conflict production reference", isXianxia ? "战斗态" : "高压态"),
+      promptEn: buildDefaultAssetPrompt(leadName, "role", "same face identity, high-conflict production reference", isXianxia ? "战斗态" : "高压态"),
     },
     {
       assetsId: baseAssets[2].assetsId,
@@ -1153,7 +1312,9 @@ function createFallbackAssetPackage(input, note) {
       type: "scene",
       reason: "主场景情绪氛围影响整段视觉统一，需要作为样片参考。",
       reuseScenes: "样片开场；第一轮冲突",
-      promptEn: buildDefaultAssetPrompt(`${mainScene} high conflict version`, "scene", "cinematic high-pressure atmosphere"),
+      imagePrompt: buildDefaultAssetPrompt(mainScene, "scene", "cinematic high-pressure atmosphere", isXianxia ? "风暴版" : "围堵版"),
+      threeViewPrompt: "",
+      promptEn: buildDefaultAssetPrompt(mainScene, "scene", "cinematic high-pressure atmosphere", isXianxia ? "风暴版" : "围堵版"),
     },
   ];
   baseAssets = supplementCharacterAssets(baseAssets, script).slice(0, 30);
@@ -1170,16 +1331,37 @@ function createFallbackAssetPackage(input, note) {
     summary: "按AI真人短剧样片制作口径提取基础资产、衍生资产和客户审核提示词。",
     source: "local",
     note,
+    executionJudgement: normalizeExecutionJudgement({}, derivedAssets, assetChecklist),
     baseAssets,
     derivedAssets,
+    addDeriveAssetCalls: buildAddDeriveAssetCalls(derivedAssets),
+    scenePrompts: buildTypedPrompts(assetChecklist, "场景"),
+    toolPrompts: buildTypedPrompts(assetChecklist, "道具"),
+    doNotExtract: normalizeDoNotExtract([]),
     assetChecklist,
     riskChecks,
   };
 }
 
-function buildDefaultAssetPrompt(name, type, visual) {
-  const subject = type === "scene" ? "scene environment reference" : type === "tool" ? "prop reference" : "character reference";
-  return `Ultra photorealistic vertical 9:16 AI short drama ${subject}, ${name || "asset"}, ${visual || "clear visual anchor"}, cinematic lighting, realistic Chinese live-action production style, consistent identity, clean composition, no cartoon, no anime, no illustration, no watermark, no text.`;
+function buildDefaultAssetPrompt(name, type, visual, state = "默认状态") {
+  const normalizedType = normalizeAssetType(type);
+  const targetName = name || "asset";
+  const anchor = visual || "clear visual anchor from the script";
+  const baseNegative = "no cartoon, no anime, no illustration, no 3D render, no game concept art, no plastic skin, no deformed hands, no extra fingers, no watermark, no text, no logo";
+  if (normalizedType === "scene") {
+    return `Ultra photorealistic vertical 9:16 Chinese live-action short drama scene reference, asset name: ${targetName}, required state: ${state}, script-accurate location design, ${anchor}, clear spatial layers, foreground middle ground background separation, realistic practical lighting direction, cinematic but grounded atmosphere, empty scene without main characters unless the script explicitly requires crowd silhouettes, ${baseNegative}.`;
+  }
+  if (normalizedType === "tool") {
+    return `Ultra photorealistic vertical 9:16 Chinese live-action short drama prop reference, asset name: ${targetName}, required state: ${state}, script-accurate prop design, ${anchor}, clear material texture, visible construction details, production-ready close-up composition, realistic lighting, clean background, ${baseNegative}.`;
+  }
+  if (normalizedType === "clip") {
+    return `Ultra photorealistic vertical 9:16 Chinese live-action short drama reusable visual clip keyframe, clip name: ${targetName}, required state: ${state}, ${anchor}, one clear production keyframe, readable action geography, realistic actors or environment only when required by the script, cinematic lighting, grounded drama texture, ${baseNegative}.`;
+  }
+  return `Ultra photorealistic vertical 9:16 AI short drama character reference, asset name: ${targetName}, required state: ${state}, Chinese live-action casting look, ${anchor}, realistic face, consistent facial identity, clear face shape, recognizable hairstyle, believable age range and gender, natural skin texture, natural hair strands, practical wardrobe from the script, grounded short-drama styling, restrained emotion baseline, cinematic lighting, high contrast but clear facial details, full-body or three-quarter body composition, ${baseNegative}.`;
+}
+
+function buildThreeViewPrompt(name, visual, state = "默认状态") {
+  return `Generate one single image containing a clean three-view character turnaround reference for ${name || "character"}, required state: ${state}. One vertical 9:16 image with three full-body views of the same realistic Chinese live-action short drama character standing side by side: front view, side view, back view. Same face identity, same height, same body proportions, same hairstyle, same clothing and props across all three views. Visual anchors: ${visual || "script-accurate face, hair, wardrobe and body type"}. Clean light gray studio background, neutral bright studio lighting, no text labels, no watermark, no cartoon, no anime, no illustration, no deformed hands, no extra fingers.`;
 }
 
 function extractLikelyName(script) {
@@ -1266,9 +1448,9 @@ function buildClientAssetSheet(workbook, pkg) {
       item.state,
       item.visualAnchor,
       item.referenceImage ? "" : "页面预览",
-      "",
+      item.threeViewStatus || "不需要",
       item.imageStatus || "待生成",
-      item.promptEn,
+      item.imagePrompt || item.promptEn,
     ]);
     row.height = item.referenceImage ? 95 : 44;
     row.alignment = { vertical: "middle", wrapText: true };

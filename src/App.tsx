@@ -47,23 +47,30 @@ type DiagnosisReport = {
 
 type BaseAsset = {
   assetsId: string;
+  assetCode?: string;
   name: string;
-  type: "role" | "scene" | "tool";
+  type: "role" | "scene" | "tool" | "clip";
   function: string;
   visualAnchor: string;
   consistencyRisk: string;
   defaultState: string;
+  imagePrompt?: string;
+  threeViewPrompt?: string;
   promptEn: string;
 };
 
 type DerivedAsset = {
   assetsId: string;
+  parentAssetsId?: string;
+  assetCode?: string;
   id: number | null;
   name: string;
   desc: string;
-  type: "role" | "scene" | "tool";
+  type: "role" | "scene" | "tool" | "clip";
   reason: string;
   reuseScenes: string;
+  imagePrompt?: string;
+  threeViewPrompt?: string;
   promptEn: string;
 };
 
@@ -74,6 +81,9 @@ type AssetChecklistItem = {
   state: string;
   visualAnchor: string;
   imageStatus: string;
+  threeViewStatus?: string;
+  imagePrompt?: string;
+  threeViewPrompt?: string;
   promptEn: string;
   sourceAssetsId: string;
   referenceImage?: string;
@@ -91,8 +101,18 @@ type AssetPackage = {
   summary: string;
   source?: string;
   note?: string;
+  executionJudgement?: {
+    needDerivedAssets: boolean;
+    derivedAssetCount: number;
+    mainReason: string;
+    riskNote: string;
+  };
   baseAssets: BaseAsset[];
   derivedAssets: DerivedAsset[];
+  addDeriveAssetCalls?: Array<{ assetsId: string; id: number | null; name: string; desc: string; type: string }>;
+  scenePrompts?: Array<{ assetCode: string; name: string; state: string; prompt: string }>;
+  toolPrompts?: Array<{ assetCode: string; name: string; state: string; prompt: string }>;
+  doNotExtract?: Array<{ content: string; reason: string }>;
   assetChecklist: AssetChecklistItem[];
   riskChecks: RiskCheck[];
 };
@@ -559,7 +579,7 @@ function App() {
         body: JSON.stringify({
           assetNo: item.assetNo,
           name: item.name,
-          prompt: item.promptEn || item.visualAnchor,
+          prompt: item.imagePrompt || item.promptEn || item.visualAnchor,
           imageStyle,
           imageModel: imageModelChoice,
         }),
@@ -1019,7 +1039,13 @@ function AssetResult({
               <p className="asset-anchor">{item.visualAnchor}</p>
               <details className="asset-prompt">
                 <summary>查看英文提示词</summary>
-                <p>{item.promptEn}</p>
+                <p>{item.imagePrompt || item.promptEn}</p>
+                {item.threeViewPrompt && (
+                  <>
+                    <strong>三视图提示词</strong>
+                    <p>{item.threeViewPrompt}</p>
+                  </>
+                )}
               </details>
               <button
                 className="button secondary asset-image-button"
@@ -1045,7 +1071,7 @@ function AssetResult({
             item.visualAnchor,
             item.imageStatus,
             item.imageModel || "未生成",
-            item.promptEn,
+            item.imagePrompt || item.promptEn,
           ])}
         />
         <AssetTable
