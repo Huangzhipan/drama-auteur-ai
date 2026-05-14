@@ -664,11 +664,16 @@ function buildAssetsPrompt(input) {
 5. 道具衍生只保留激活、损坏、展开、发光、碎裂等可复用状态。
 6. 每个父资产最多 1-5 个衍生，宁缺勿滥。
 7. 对AI视频高风险内容要在风险检查里说明如何规避，例如多人同框、打斗、拥抱拉扯、巨兽、复杂法术、群像混乱。
+8. 角色必须尽量完整：凡是剧本里具名、反复出现、有台词/动作/关系功能的人物，都要进入 baseAssets 的 role；不要只提取主角。
+9. baseAssets 建议顺序：主要角色 → 重要配角/反派 → 核心场景 → 关键道具。
+10. derivedAssets 不能空泛；只要剧本出现稳定复用的服装变化、受伤/战损、雨夜/白天、破损/激活等状态，就必须挂到对应父资产。
 
 三、输出风格
 - 面向客户审核，专业、清晰、可落地。
 - 不要编造剧本没有的人物关系；如果信息不足，要用“待补充”说明。
 - 英文提示词必须适合真人短剧视觉参考图生成，竖屏 9:16，写实、定妆、无水印、无文字。
+- 每个 promptEn 必须只服务当前资产，必须写清对应 name、defaultState/状态、visualAnchor，不允许写成泛泛的“主角/场景参考图”。
+- assetChecklist 必须覆盖每一个 baseAssets 默认态和每一个 derivedAssets 衍生态，数量必须等于 baseAssets.length + derivedAssets.length。
 - 所有 ID 必须稳定，英文小写加下划线，例如 role_yang_xuan、scene_crayfish_stall、tool_dragon_slayer_blade。
 
 剧本名称：${input.title || "未命名剧本"}
@@ -728,8 +733,15 @@ ${script || "用户未提供正文，请输出低置信度资产框架。"}
 
 function normalizeAssetPackage(pkg, input, source) {
   const fallback = createFallbackAssetPackage(input, "");
-  const baseAssets = normalizeAssetsArray(pkg.baseAssets, fallback.baseAssets).slice(0, 30);
-  const derivedAssets = normalizeDerivedArray(pkg.derivedAssets, fallback.derivedAssets).slice(0, 60);
+  const baseAssets = supplementCharacterAssets(
+    normalizeAssetsArray(pkg.baseAssets, fallback.baseAssets),
+    String(input.scriptText || ""),
+  ).slice(0, 30);
+  const derivedAssets = supplementDerivedAssets(
+    normalizeDerivedArray(pkg.derivedAssets, fallback.derivedAssets),
+    baseAssets,
+    String(input.scriptText || ""),
+  ).slice(0, 60);
   const assetChecklist = normalizeChecklistArray(pkg.assetChecklist, baseAssets, derivedAssets).slice(0, 90);
   return {
     title: String(pkg.title || input.title || fallback.title || "未命名剧本"),
@@ -775,22 +787,82 @@ function normalizeDerivedArray(value, fallback) {
   }));
 }
 
-function normalizeChecklistArray(value, baseAssets, derivedAssets) {
-  if (Array.isArray(value) && value.length) {
-    return value.map((item) => ({
-      category: normalizeCategory(item.category || item.type),
-      assetNo: String(item.assetNo || ""),
-      name: String(item.name || ""),
-      state: String(item.state || "默认"),
-      visualAnchor: String(item.visualAnchor || ""),
-      imageStatus: String(item.imageStatus || "待生成"),
-      promptEn: String(item.promptEn || ""),
-      sourceAssetsId: String(item.sourceAssetsId || ""),
-      referenceImage: item.referenceImage || "",
-      imageModel: item.imageModel || "",
-    }));
+function supplementCharacterAssets(baseAssets, script) {
+  const existing = new Set(baseAssets.filter((item) => item.type === "role").map((item) => item.name));
+  const names = extractLikelyCharacterNames(script)
+    .filter((name) => !existing.has(name))
+    .slice(0, Math.max(0, 12 - existing.size));
+  const supplements = names.map((name) => ({
+    assetsId: `role_${slug(name)}`,
+    name,
+    type: "role",
+    function: "剧本具名人物；需进入客户审核资产，避免样片阶段临时补脸。",
+    visualAnchor: "中国真人短剧人物 / 年龄身份待从剧本细化 / 脸型发型服装需固定 / 与其他角色区分明显",
+    consistencyRisk: "Gemini 未完整展开该角色，需在客户审核时补充年龄、身份和服装参考。",
+    defaultState: "默认定妆",
+    promptEn: buildDefaultAssetPrompt(name, "role", "Chinese live-action short drama named character, realistic actor casting reference, distinct face, practical wardrobe, consistent identity"),
+  }));
+  return [...baseAssets, ...supplements];
+}
+
+function supplementDerivedAssets(derivedAssets, baseAssets, script) {
+  const existingKeys = new Set(derivedAssets.map((item) => `${item.assetsId}:${item.name}`));
+  const additions = [];
+  const lead = baseAssets.find((item) => item.type === "role");
+  if (lead && /受伤|流血|战损|狼狈|昏迷|断腿|断臂|残废|被打|羞辱|围堵|追杀/.test(script)) {
+    additions.push({
+      assetsId: lead.assetsId,
+      id: null,
+      name: "受压态",
+      desc: "与默认态差异 · 服装略凌乱，带轻微伤痕或压迫痕迹，眼神仍保持反击感",
+      type: "role",
+      reason: "主角高压状态会反复用于开场压迫和反击前情绪铺垫，需要单独固定。",
+      reuseScenes: "开场冲突；被压迫段落；反击前镜头",
+      promptEn: buildDefaultAssetPrompt(`${lead.name} pressure state`, "role", "same face identity, slightly messy practical wardrobe, subtle injury marks, restrained anger, live-action short drama reference"),
+    });
   }
 
+  for (const scene of baseAssets.filter((item) => item.type === "scene")) {
+    if (/雨夜|暴雨|下雨|雨中/.test(`${script}\n${scene.name}\n${scene.visualAnchor}`)) {
+      additions.push({
+        assetsId: scene.assetsId,
+        id: null,
+        name: "雨夜版",
+        desc: "与默认态差异 · 夜色雨水、湿地反光、冷色环境光，空间结构保持一致",
+        type: "scene",
+        reason: "雨夜场景会明显改变光线和空间质感，需作为可复用场景状态。",
+        reuseScenes: "雨夜冲突；追逐；压迫或反转镜头",
+        promptEn: buildDefaultAssetPrompt(`${scene.name} rainy night version`, "scene", "same location layout, rainy night, wet reflections, cold realistic lighting, live-action short drama scene reference"),
+      });
+    }
+  }
+
+  for (const tool of baseAssets.filter((item) => item.type === "tool")) {
+    if (/破损|碎裂|染血|激活|发光|展开|启动/.test(`${script}\n${tool.name}\n${tool.visualAnchor}`)) {
+      additions.push({
+        assetsId: tool.assetsId,
+        id: null,
+        name: "关键态",
+        desc: "与默认态差异 · 道具进入激活、破损或高光特写状态，材质和形状保持一致",
+        type: "tool",
+        reason: "关键道具状态会承担反转证据或能力展示，需要客户提前确认。",
+        reuseScenes: "证据揭露；反转镜头；特写镜头",
+        promptEn: buildDefaultAssetPrompt(`${tool.name} key state`, "tool", "same prop design, activated or damaged key state, realistic close-up reference"),
+      });
+    }
+  }
+
+  for (const item of additions) {
+    const key = `${item.assetsId}:${item.name}`;
+    if (!existingKeys.has(key)) {
+      derivedAssets.push(item);
+      existingKeys.add(key);
+    }
+  }
+  return derivedAssets;
+}
+
+function normalizeChecklistArray(value, baseAssets, derivedAssets) {
   const counters = { role: 0, scene: 0, tool: 0 };
   const baseRows = baseAssets.map((item) => {
     counters[item.type] = (counters[item.type] || 0) + 1;
@@ -802,7 +874,7 @@ function normalizeChecklistArray(value, baseAssets, derivedAssets) {
       state: `${item.defaultState || "默认"} (默认)`,
       visualAnchor: item.visualAnchor,
       imageStatus: "待生成",
-      promptEn: item.promptEn,
+      promptEn: buildChecklistPrompt(item.promptEn, item.name, `${item.defaultState || "默认"} (默认)`, item.visualAnchor, item.type),
       sourceAssetsId: item.assetsId,
       referenceImage: "",
       imageModel: "",
@@ -823,13 +895,48 @@ function normalizeChecklistArray(value, baseAssets, derivedAssets) {
       state: `${item.name} (衍生)`,
       visualAnchor: item.desc.replace(/^与默认态差异\s*·\s*/, ""),
       imageStatus: "待生成",
-      promptEn: item.promptEn,
+      promptEn: buildChecklistPrompt(item.promptEn, base?.name || item.assetsId || "衍生资产", `${item.name} (衍生)`, item.desc.replace(/^与默认态差异\s*·\s*/, ""), item.type),
       sourceAssetsId: item.assetsId,
       referenceImage: "",
       imageModel: "",
     };
   });
-  return [...baseRows, ...derivedRows];
+  const canonicalRows = [...baseRows, ...derivedRows];
+  return mergeChecklistRuntimeState(canonicalRows, value);
+}
+
+function mergeChecklistRuntimeState(canonicalRows, value) {
+  if (!Array.isArray(value) || !value.length) return canonicalRows;
+  const suppliedRows = value.map((item) => ({
+    assetNo: String(item.assetNo || ""),
+    state: String(item.state || "默认"),
+    name: String(item.name || ""),
+    sourceAssetsId: String(item.sourceAssetsId || ""),
+    imageStatus: String(item.imageStatus || ""),
+    referenceImage: item.referenceImage || "",
+    imageModel: item.imageModel || "",
+  }));
+  return canonicalRows.map((row) => {
+    const supplied = suppliedRows.find((item) => (
+      (item.assetNo && item.assetNo === row.assetNo)
+      || (item.sourceAssetsId && item.sourceAssetsId === row.sourceAssetsId && item.state === row.state)
+      || (item.name === row.name && item.state === row.state)
+    ));
+    if (!supplied) return row;
+    return {
+      ...row,
+      imageStatus: supplied.imageStatus || row.imageStatus,
+      referenceImage: supplied.referenceImage || row.referenceImage,
+      imageModel: supplied.imageModel || row.imageModel,
+    };
+  });
+}
+
+function buildChecklistPrompt(prompt, name, state, visualAnchor, type) {
+  const subject = type === "scene" ? "scene/location asset" : type === "tool" ? "prop asset" : "character casting asset";
+  return `${prompt || buildDefaultAssetPrompt(name, type, visualAnchor)}
+
+Exact asset row: ${subject}. Asset name: ${name}. Required state: ${state}. Required visual anchors: ${visualAnchor}. Generate only this asset row, not another character, not another scene, not a mixed poster.`;
 }
 
 function normalizeRiskChecks(value, fallback) {
@@ -985,7 +1092,7 @@ function createFallbackAssetPackage(input, note) {
   const antagonist = /光头|混混|反派|恶霸/.test(script) ? "压迫者" : "反派";
   const mainScene = isXianxia ? "关键战场" : isUrban ? "公开冲突场" : "核心冲突场";
 
-  const baseAssets = [
+  let baseAssets = [
     {
       assetsId: `role_${slug(leadName)}`,
       name: leadName,
@@ -1027,7 +1134,7 @@ function createFallbackAssetPackage(input, note) {
       promptEn: buildDefaultAssetPrompt(isXianxia ? "核心武器" : "关键证据道具", "tool", isXianxia ? "ancient heavy blade with energy patterns" : "realistic evidence prop for short drama close-up"),
     },
   ];
-  const derivedAssets = [
+  let derivedAssets = [
     {
       assetsId: baseAssets[0].assetsId,
       id: null,
@@ -1049,6 +1156,8 @@ function createFallbackAssetPackage(input, note) {
       promptEn: buildDefaultAssetPrompt(`${mainScene} high conflict version`, "scene", "cinematic high-pressure atmosphere"),
     },
   ];
+  baseAssets = supplementCharacterAssets(baseAssets, script).slice(0, 30);
+  derivedAssets = supplementDerivedAssets(derivedAssets, baseAssets, script).slice(0, 60);
   const assetChecklist = normalizeChecklistArray([], baseAssets, derivedAssets);
   const riskChecks = [
     { content: "多人同框、群体围堵或战斗群像", judgement: "高风险；客户审核阶段先固定主角、反派和主场景，正片多用1-3人同框。" },
@@ -1074,8 +1183,48 @@ function buildDefaultAssetPrompt(name, type, visual) {
 }
 
 function extractLikelyName(script) {
+  const dialogue = String(script || "").match(/(?:^|\n|\r)\s*([\u4e00-\u9fa5]{2,4})\s*[：:]/);
+  if (dialogue?.[1] && !/第一|第二|第三|雨夜|镜头|场景|剧本/.test(dialogue[1])) return dialogue[1];
   const match = script.match(/(?:男主|主角|女主)?[“"]?([\u4e00-\u9fa5]{2,4})[”"]?(?:冷笑|抬头|醒来|走进|说道|被|在|，)/);
   return match?.[1] && !/第一|第二|第三|雨夜|镜头|场景|剧本/.test(match[1]) ? match[1] : "";
+}
+
+function extractLikelyCharacterNames(script) {
+  const text = String(script || "");
+  const blocked = new Set([
+    "第一集", "第二集", "第三集", "第四集", "第五集", "第六集", "第七集", "第八集", "第九集", "第十集",
+    "办公室", "会议室", "客厅", "医院", "学校", "教室", "公司", "酒店", "雨夜", "夜晚", "白天", "镜头", "场景",
+    "雨夜街头", "街头", "现场", "门口", "车里", "窗外", "台上", "台下",
+    "男人", "女人", "众人", "同学", "保镖", "医生", "护士", "记者", "员工", "老师", "警察", "司机", "服务员",
+    "男主", "女主", "主角", "反派", "前女友", "未婚妻", "总裁", "家族", "父亲", "母亲", "爷爷", "奶奶", "哥哥", "妹妹",
+  ]);
+  const counts = new Map();
+  const add = (name, weight = 1) => {
+    const value = String(name || "").trim();
+    if (!/^[\u4e00-\u9fa5]{2,4}$/.test(value)) return;
+    if (blocked.has(value)) return;
+    if (/任人|街头|雨夜|现场|门口|窗外|台上|台下|教室|公司|酒店|医院|学校|秘境/.test(value)) return;
+    if (/^(一个|这个|那个|自己|所有|众人|全场|所有人|为什么|怎么会|没想到|突然|随后|此时|只见)$/.test(value)) return;
+    counts.set(value, (counts.get(value) || 0) + weight);
+  };
+
+  for (const match of text.matchAll(/(?:男主|女主|主角|反派|前女友|未婚妻|总裁|少爷|小姐|师父|师尊|父亲|母亲)[：:：\s“"]*([\u4e00-\u9fa5]{2,4})/g)) {
+    add(match[1], 4);
+  }
+  for (const match of text.matchAll(/(?:^|\n|\r|[。！？])\s*([\u4e00-\u9fa5]{2,4})\s*[：:]/g)) {
+    add(match[1], 4);
+  }
+  for (const match of text.matchAll(/([\u4e00-\u9fa5]{2,4})(?:冷笑|怒道|说道|开口|抬头|走进|出现|冲进|站起|跪下|转身|看向|盯着|推开|打断|拦住|宣布|质问|嘲讽|羞辱|护住|抱住|掏出|拿出|签下|离开|带着|带|围堵|追杀|威胁|命令|跪在|坐在)/g)) {
+    add(match[1], 2);
+  }
+  for (const match of text.matchAll(/(?:叫|名叫|名为|我叫|她叫|他叫)([\u4e00-\u9fa5]{2,4})/g)) {
+    add(match[1], 3);
+  }
+
+  return [...counts.entries()]
+    .filter(([, count]) => count >= 2)
+    .sort((a, b) => b[1] - a[1])
+    .map(([name]) => name);
 }
 
 async function buildAssetsWorkbook(assetPackage) {
