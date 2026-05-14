@@ -183,7 +183,10 @@ const server = http.createServer(async (req, res) => {
         writeJson(res, 400, { ok: false, error: "缺少生图提示词。" });
         return;
       }
-      const result = await generateGeminiReferenceImage(prompt);
+      const result = await generateGeminiReferenceImage(prompt, {
+        modelChoice: body.imageModel,
+        imageStyle: body.imageStyle,
+      });
       writeJson(res, 200, {
         ok: true,
         referenceImage: result.image,
@@ -878,13 +881,15 @@ async function attachReferenceImages(assetPackage) {
   return assetPackage;
 }
 
-async function generateGeminiReferenceImage(prompt) {
+async function generateGeminiReferenceImage(prompt, options = {}) {
+  const modelChoice = String(options.modelChoice || "auto");
   const preferredModel = process.env.GEMINI_IMAGE_MODEL || "gemini-3.1-flash-image-preview";
-  const models = [preferredModel, "gemini-2.5-flash-image"].filter((model, index, array) => model && array.indexOf(model) === index);
+  const models = pickImageModels(modelChoice, preferredModel);
+  const finalPrompt = buildImagePrompt(prompt, options.imageStyle);
   const errors = [];
   for (const model of models) {
     try {
-      const result = await requestGeminiReferenceImage(model, prompt);
+      const result = await requestGeminiReferenceImage(model, finalPrompt);
       if (result?.image) return result;
       errors.push(`${model}: no image`);
     } catch (error) {
@@ -893,6 +898,38 @@ async function generateGeminiReferenceImage(prompt) {
     }
   }
   throw new Error(errors.join(" | "));
+}
+
+function pickImageModels(modelChoice, preferredModel) {
+  const allowed = new Set(["gemini-3.1-flash-image-preview", "gemini-2.5-flash-image"]);
+  if (allowed.has(modelChoice)) return [modelChoice];
+  return [preferredModel, "gemini-2.5-flash-image"].filter((model, index, array) => model && array.indexOf(model) === index);
+}
+
+function buildImagePrompt(prompt, imageStyle) {
+  const style = String(imageStyle || "real_short_drama");
+  const base = String(prompt || "").replace(/\b(anime|cartoon|illustration|concept art|digital painting|3d render|game character)\b/gi, "");
+  if (style === "anime_concept") {
+    return `${base}
+
+Style: high quality anime concept art for short drama pre-production, clean character design, coherent costume, no text, no watermark.`;
+  }
+  if (style === "ancient_real") {
+    return `${base}
+
+Style: photorealistic Chinese live-action costume drama production still, real human actor, natural skin texture, real fabric, practical costume and props, realistic lens photography, vertical 9:16.
+Strictly avoid anime, manga, illustration, game concept art, CGI render, plastic skin, sci-fi armor unless explicitly required by the script.`;
+  }
+  if (style === "cinematic_real") {
+    return `${base}
+
+Style: cinematic photoreal live-action production still, real actor or real location, natural human face, believable wardrobe, realistic camera lens, grounded lighting, vertical 9:16.
+Strictly avoid anime, manga, illustration, game character design, 3D render, concept art, exaggerated fantasy armor, plastic skin, text, watermark.`;
+  }
+  return `${base}
+
+Style: Chinese真人短剧定妆照 / live-action short drama asset reference, real Chinese actor look, natural skin texture, realistic street-level wardrobe, practical production design, grounded modern drama lighting, vertical 9:16.
+Strictly avoid anime, manga, illustration, digital painting, game character, 3D render, concept art, sci-fi armor, superhero costume, plastic skin, text, watermark.`;
 }
 
 async function requestGeminiReferenceImage(model, prompt) {

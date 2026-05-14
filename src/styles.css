@@ -132,6 +132,35 @@
   line-height: 1.7;
 }
 
+.asset-generation-controls {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(220px, 1fr));
+  gap: 14px;
+  margin: 22px 0 0;
+  padding: 18px;
+  border-radius: 8px;
+  background: #eef6f7;
+}
+
+.asset-generation-controls label {
+  display: grid;
+  gap: 8px;
+  color: #52616b;
+  font-size: 14px;
+  font-weight: 800;
+}
+
+.asset-generation-controls select {
+  width: 100%;
+  border: 1px solid #cfdee5;
+  border-radius: 8px;
+  background: #fff;
+  color: #202932;
+  padding: 12px 14px;
+  font: inherit;
+  font-weight: 800;
+}
+
 .asset-stat-grid {
   display: grid;
   grid-template-columns: repeat(4, minmax(0, 1fr));
@@ -313,6 +342,7 @@
   .asset-workbench,
   .asset-stat-grid,
   .asset-preview-grid,
+  .asset-generation-controls,
   .asset-result-head {
     grid-template-columns: 1fr;
     display: grid;

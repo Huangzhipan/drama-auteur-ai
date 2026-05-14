@@ -97,6 +97,9 @@ type AssetPackage = {
   riskChecks: RiskCheck[];
 };
 
+type ImageStyle = "real_short_drama" | "cinematic_real" | "ancient_real" | "anime_concept";
+type ImageModelChoice = "auto" | "gemini-3.1-flash-image-preview" | "gemini-2.5-flash-image";
+
 const initialForm: FormState = {
   title: "",
   scriptText: "",
@@ -364,6 +367,8 @@ function App() {
   const [isGeneratingAssets, setIsGeneratingAssets] = useState(false);
   const [isExportingAssets, setIsExportingAssets] = useState(false);
   const [generatingAssetKey, setGeneratingAssetKey] = useState("");
+  const [imageStyle, setImageStyle] = useState<ImageStyle>("real_short_drama");
+  const [imageModelChoice, setImageModelChoice] = useState<ImageModelChoice>("auto");
   const [progress, setProgress] = useState(0);
   const [assetProgress, setAssetProgress] = useState(0);
   const [fileHint, setFileHint] = useState("");
@@ -555,6 +560,8 @@ function App() {
           assetNo: item.assetNo,
           name: item.name,
           prompt: item.promptEn || item.visualAnchor,
+          imageStyle,
+          imageModel: imageModelChoice,
         }),
       });
       const result = await response.json().catch(() => ({}));
@@ -652,6 +659,10 @@ function App() {
             onRun={runAssetGeneration}
             onExport={exportAssetsExcel}
             onGenerateImage={generateAssetImage}
+            imageStyle={imageStyle}
+            setImageStyle={setImageStyle}
+            imageModelChoice={imageModelChoice}
+            setImageModelChoice={setImageModelChoice}
             isGenerating={isGeneratingAssets}
             isExporting={isExportingAssets}
             generatingAssetKey={generatingAssetKey}
@@ -803,6 +814,10 @@ function AssetExpert({
   onRun,
   onExport,
   onGenerateImage,
+  imageStyle,
+  setImageStyle,
+  imageModelChoice,
+  setImageModelChoice,
   isGenerating,
   isExporting,
   generatingAssetKey,
@@ -817,6 +832,10 @@ function AssetExpert({
   onRun: () => void;
   onExport: () => void;
   onGenerateImage: (item: AssetChecklistItem, index: number) => void;
+  imageStyle: ImageStyle;
+  setImageStyle: (value: ImageStyle) => void;
+  imageModelChoice: ImageModelChoice;
+  setImageModelChoice: (value: ImageModelChoice) => void;
   isGenerating: boolean;
   isExporting: boolean;
   generatingAssetKey: string;
@@ -899,6 +918,10 @@ function AssetExpert({
           assetPackage={assetPackage}
           onExport={onExport}
           onGenerateImage={onGenerateImage}
+          imageStyle={imageStyle}
+          setImageStyle={setImageStyle}
+          imageModelChoice={imageModelChoice}
+          setImageModelChoice={setImageModelChoice}
           isExporting={isExporting}
           generatingAssetKey={generatingAssetKey}
         />
@@ -916,12 +939,20 @@ function AssetResult({
   assetPackage,
   onExport,
   onGenerateImage,
+  imageStyle,
+  setImageStyle,
+  imageModelChoice,
+  setImageModelChoice,
   isExporting,
   generatingAssetKey,
 }: {
   assetPackage: AssetPackage;
   onExport: () => void;
   onGenerateImage: (item: AssetChecklistItem, index: number) => void;
+  imageStyle: ImageStyle;
+  setImageStyle: (value: ImageStyle) => void;
+  imageModelChoice: ImageModelChoice;
+  setImageModelChoice: (value: ImageModelChoice) => void;
   isExporting: boolean;
   generatingAssetKey: string;
 }) {
@@ -938,6 +969,26 @@ function AssetResult({
         <button className="button primary" onClick={onExport} disabled={isExporting}>
           {isExporting ? "导出中" : "导出Excel资产表"}
         </button>
+      </div>
+
+      <div className="asset-generation-controls">
+        <label>
+          <span>图片风格</span>
+          <select value={imageStyle} onChange={(event) => setImageStyle(event.target.value as ImageStyle)}>
+            <option value="real_short_drama">真人短剧定妆照（默认）</option>
+            <option value="cinematic_real">电影写实质感</option>
+            <option value="ancient_real">古装/仙侠真人</option>
+            <option value="anime_concept">动漫概念图</option>
+          </select>
+        </label>
+        <label>
+          <span>生图模型</span>
+          <select value={imageModelChoice} onChange={(event) => setImageModelChoice(event.target.value as ImageModelChoice)}>
+            <option value="auto">自动：优先 Nano Banana 2，失败降级</option>
+            <option value="gemini-3.1-flash-image-preview">Nano Banana 2（Gemini 3.1）</option>
+            <option value="gemini-2.5-flash-image">Nano Banana（Gemini 2.5）</option>
+          </select>
+        </label>
       </div>
 
       <div className="asset-stat-grid">
