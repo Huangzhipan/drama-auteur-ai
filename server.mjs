@@ -160,6 +160,9 @@ const server = http.createServer(async (req, res) => {
       } else {
         assetPackage = createFallbackAssetPackage(body, "未检测到 GEMINI_API_KEY，当前资产清单由本地规则生成。");
       }
+      if (shouldGenerateImages(body)) {
+        assetPackage = await attachReferenceImages(assetPackage);
+      }
       writeJson(res, 200, assetPackage);
     } catch (error) {
       const message = error instanceof Error ? error.message : "资产生成失败";
@@ -601,11 +604,14 @@ async function buildAssetsWithGemini(input) {
   const text = data?.candidates?.[0]?.content?.parts?.map((part) => part.text || "").join("") || "";
   if (!text.trim()) throw new Error("Gemini 未返回资产内容。");
   const parsed = JSON.parse(stripJsonFence(text));
-  const normalized = normalizeAssetPackage(parsed, input, "gemini");
-  if (String(input.generateImages || "") === "true" || input.generateImages === true) {
-    return await attachReferenceImages(normalized);
-  }
-  return normalized;
+  return normalizeAssetPackage(parsed, input, "gemini");
+}
+
+function shouldGenerateImages(input) {
+  const value = input?.generateImages;
+  if (value === true) return true;
+  const text = String(value || "").trim().toLowerCase();
+  return text === "true" || text === "1" || text === "yes";
 }
 
 function buildAssetsPrompt(input) {
@@ -818,7 +824,12 @@ function normalizeCategory(category) {
 
 async function attachReferenceImages(assetPackage) {
   const limit = Math.max(0, Math.min(12, Number(process.env.ASSET_IMAGE_LIMIT || 4)));
-  if (!process.env.GEMINI_API_KEY || !limit) return assetPackage;
+  if (!process.env.GEMINI_API_KEY || !limit) {
+    for (const row of assetPackage.assetChecklist || []) {
+      row.imageStatus = !process.env.GEMINI_API_KEY ? "未配置生图 API" : "未开启生图";
+    }
+    return assetPackage;
+  }
   const rows = assetPackage.assetChecklist.slice(0, limit);
   for (const row of rows) {
     try {
@@ -826,9 +837,12 @@ async function attachReferenceImages(assetPackage) {
       if (image) {
         row.referenceImage = image;
         row.imageStatus = "已生成";
+      } else {
+        row.imageStatus = "生图未返回图片";
       }
-    } catch {
-      row.imageStatus = "提示词已生成";
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "生图失败";
+      row.imageStatus = `生图失败：${message.slice(0, 36)}`;
     }
   }
   return assetPackage;
@@ -859,7 +873,10 @@ async function generateGeminiReferenceImage(prompt) {
       generationConfig,
     }),
   }).finally(() => clearTimeout(timeout));
-  if (!response.ok) return "";
+  if (!response.ok) {
+    const detail = await response.text();
+    throw new Error(`${response.status} ${detail.slice(0, 160)}`);
+  }
   const data = await response.json();
   const parts = data?.candidates?.[0]?.content?.parts || [];
   const imagePart = parts.find((part) => part?.inlineData?.data);
