@@ -849,18 +849,39 @@ async function attachReferenceImages(assetPackage) {
 }
 
 async function generateGeminiReferenceImage(prompt) {
-  const model = process.env.GEMINI_IMAGE_MODEL || "gemini-3.1-flash-image-preview";
+  const preferredModel = process.env.GEMINI_IMAGE_MODEL || "gemini-3.1-flash-image-preview";
+  const models = [preferredModel, "gemini-2.5-flash-image"].filter((model, index, array) => model && array.indexOf(model) === index);
+  const errors = [];
+  for (const model of models) {
+    try {
+      const image = await requestGeminiReferenceImage(model, prompt);
+      if (image) return image;
+      errors.push(`${model}: no image`);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "unknown error";
+      errors.push(`${model}: ${message}`);
+    }
+  }
+  throw new Error(errors.join(" | "));
+}
+
+async function requestGeminiReferenceImage(model, prompt) {
   const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${encodeURIComponent(process.env.GEMINI_API_KEY)}`;
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), Number(process.env.GEMINI_IMAGE_TIMEOUT_MS || 90_000));
-  const generationConfig = {
-    responseModalities: ["TEXT", "IMAGE"],
+  const body = {
+    contents: [{ role: "user", parts: [{ text: `${prompt}\n\nGenerate one clean vertical 9:16 visual reference image for production review. No text, no watermark.` }] }],
+    generationConfig: { responseModalities: ["TEXT", "IMAGE"] },
   };
   if (model.includes("3.1")) {
-    generationConfig.responseFormat = {
-      image: {
-        aspectRatio: "9:16",
-        imageSize: "1K",
+    body.tools = [{ googleSearch: { searchTypes: { webSearch: {}, imageSearch: {} } } }];
+    body.generationConfig = {
+      responseModalities: ["IMAGE"],
+      responseFormat: {
+        image: {
+          aspectRatio: "9:16",
+          imageSize: "1K",
+        },
       },
     };
   }
@@ -868,14 +889,11 @@ async function generateGeminiReferenceImage(prompt) {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     signal: controller.signal,
-    body: JSON.stringify({
-      contents: [{ role: "user", parts: [{ text: `${prompt}\n\nGenerate one clean vertical 9:16 visual reference image for production review. No text, no watermark.` }] }],
-      generationConfig,
-    }),
+    body: JSON.stringify(body),
   }).finally(() => clearTimeout(timeout));
   if (!response.ok) {
     const detail = await response.text();
-    throw new Error(`${response.status} ${detail.slice(0, 160)}`);
+    throw new Error(`${response.status} ${compactErrorText(detail).slice(0, 220)}`);
   }
   const data = await response.json();
   const parts = data?.candidates?.[0]?.content?.parts || [];
@@ -883,6 +901,15 @@ async function generateGeminiReferenceImage(prompt) {
   if (!imagePart) return "";
   const mime = imagePart.inlineData.mimeType || "image/png";
   return `data:${mime};base64,${imagePart.inlineData.data}`;
+}
+
+function compactErrorText(text) {
+  try {
+    const parsed = JSON.parse(text);
+    return parsed?.error?.message || text;
+  } catch {
+    return String(text || "").replace(/\s+/g, " ");
+  }
 }
 
 function createFallbackAssetPackage(input, note) {
