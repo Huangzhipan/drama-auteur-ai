@@ -23,6 +23,268 @@
   --shadow-strong: 0 30px 90px rgba(33, 44, 55, 0.09);
 }
 
+.asset-page {
+  max-width: 1380px;
+  margin: 0 auto;
+  padding: 74px 44px 96px;
+}
+
+.asset-hero {
+  max-width: 760px;
+  margin-bottom: 34px;
+}
+
+.asset-hero h1 {
+  margin: 10px 0 18px;
+  color: #202932;
+  font-size: 56px;
+  line-height: 1.08;
+  font-weight: 900;
+}
+
+.asset-workbench {
+  display: grid;
+  grid-template-columns: minmax(0, 1.55fr) minmax(300px, 0.75fr);
+  gap: 28px;
+  align-items: stretch;
+}
+
+.asset-input-panel,
+.asset-rules-panel,
+.asset-empty,
+.asset-result,
+.asset-table-wrap {
+  border: 1px solid #dce5eb;
+  border-radius: 8px;
+  background: #fff;
+  box-shadow: 0 28px 70px rgba(24, 39, 50, 0.08);
+}
+
+.asset-input-panel {
+  padding: 28px;
+}
+
+.asset-rules-panel {
+  padding: 34px;
+}
+
+.asset-rules-panel h2,
+.asset-empty h2,
+.asset-result-head h2,
+.asset-table-wrap h3 {
+  margin: 0;
+  color: #202932;
+  font-weight: 900;
+}
+
+.asset-rules-panel ul {
+  display: grid;
+  gap: 14px;
+  margin: 22px 0 28px;
+  padding: 0;
+  color: #52616b;
+  list-style: none;
+  font-size: 16px;
+  line-height: 1.8;
+}
+
+.asset-rules-panel li {
+  padding-left: 18px;
+  border-left: 4px solid #2c7b86;
+}
+
+.asset-script textarea {
+  min-height: 260px;
+}
+
+.asset-progress {
+  margin: 28px 0;
+}
+
+.asset-empty {
+  margin-top: 28px;
+  padding: 34px;
+  color: #5c6b73;
+}
+
+.asset-empty p {
+  margin: 12px 0 0;
+}
+
+.asset-result {
+  margin-top: 28px;
+  padding: 32px;
+}
+
+.asset-result-head {
+  display: flex;
+  justify-content: space-between;
+  gap: 20px;
+  align-items: flex-start;
+  padding-bottom: 24px;
+  border-bottom: 1px solid #e6edf2;
+}
+
+.asset-result-head span {
+  display: block;
+  margin-top: 10px;
+  color: #5c6b73;
+  line-height: 1.7;
+}
+
+.asset-stat-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 14px;
+  margin: 24px 0;
+}
+
+.asset-stat {
+  min-height: 104px;
+  padding: 20px;
+  border-radius: 8px;
+  background: #f2f7f9;
+}
+
+.asset-stat span {
+  display: block;
+  color: #64737d;
+  font-weight: 800;
+}
+
+.asset-stat strong {
+  display: block;
+  margin-top: 12px;
+  color: #202932;
+  font-size: 34px;
+  line-height: 1;
+  font-weight: 900;
+}
+
+.asset-preview-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 16px;
+  margin-bottom: 30px;
+}
+
+.asset-preview-card {
+  overflow: hidden;
+  border: 1px solid #e2eaf0;
+  border-radius: 8px;
+  background: #fbfdfe;
+}
+
+.asset-preview-media {
+  display: grid;
+  place-items: center;
+  aspect-ratio: 9 / 12;
+  background: linear-gradient(135deg, #eef6f7, #d8ebef);
+  color: #2c7b86;
+  font-size: 24px;
+  font-weight: 900;
+}
+
+.asset-preview-media img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+}
+
+.asset-preview-card div:last-child {
+  padding: 14px;
+}
+
+.asset-preview-card strong {
+  display: block;
+  color: #202932;
+  font-weight: 900;
+  line-height: 1.35;
+}
+
+.asset-preview-card p,
+.asset-preview-card em {
+  display: block;
+  margin: 8px 0 0;
+  color: #64737d;
+  font-style: normal;
+  line-height: 1.45;
+}
+
+.asset-tables {
+  display: grid;
+  gap: 22px;
+}
+
+.asset-table-wrap {
+  padding: 22px;
+  box-shadow: none;
+}
+
+.asset-table-scroll {
+  overflow-x: auto;
+  margin-top: 16px;
+}
+
+.asset-table {
+  width: 100%;
+  min-width: 980px;
+  border-collapse: collapse;
+  font-size: 14px;
+}
+
+.asset-table th,
+.asset-table td {
+  padding: 12px 14px;
+  border: 1px solid #e2eaf0;
+  text-align: left;
+  vertical-align: top;
+  line-height: 1.65;
+}
+
+.asset-table th {
+  background: #287381;
+  color: #fff;
+  font-weight: 900;
+}
+
+.asset-table tr:nth-child(even) td {
+  background: #f8fafb;
+}
+
+@media (max-width: 1100px) {
+  .asset-workbench,
+  .asset-stat-grid,
+  .asset-preview-grid {
+    grid-template-columns: 1fr 1fr;
+  }
+}
+
+@media (max-width: 760px) {
+  .asset-page {
+    padding: 42px 18px 70px;
+  }
+
+  .asset-hero h1 {
+    font-size: 38px;
+  }
+
+  .asset-workbench,
+  .asset-stat-grid,
+  .asset-preview-grid,
+  .asset-result-head {
+    grid-template-columns: 1fr;
+    display: grid;
+  }
+
+  .asset-input-panel,
+  .asset-rules-panel,
+  .asset-result {
+    padding: 20px;
+  }
+}
+
 * {
   box-sizing: border-box;
 }

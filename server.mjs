@@ -2,6 +2,7 @@ import http from "node:http";
 import crypto from "node:crypto";
 import { mkdirSync, readFileSync, existsSync, writeFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
+import ExcelJS from "exceljs";
 
 const PORT = Number(process.env.API_PORT || 8787);
 const HOST = process.env.API_HOST || "0.0.0.0";
@@ -140,6 +141,46 @@ const server = http.createServer(async (req, res) => {
       writeJson(res, 200, report);
     } catch (error) {
       const message = error instanceof Error ? error.message : "诊断失败";
+      writeJson(res, 500, { error: message });
+    }
+    return;
+  }
+
+  if (req.method === "POST" && req.url === "/api/assets") {
+    try {
+      const body = await readJson(req);
+      let assetPackage;
+      if (process.env.GEMINI_API_KEY) {
+        try {
+          assetPackage = await buildAssetsWithGemini(body);
+        } catch (error) {
+          const message = error instanceof Error ? error.message : "Gemini 资产分析失败";
+          assetPackage = createFallbackAssetPackage(body, `Gemini 暂时不可用，当前资产清单由本地规则生成。原因：${message.slice(0, 120)}`);
+        }
+      } else {
+        assetPackage = createFallbackAssetPackage(body, "未检测到 GEMINI_API_KEY，当前资产清单由本地规则生成。");
+      }
+      writeJson(res, 200, assetPackage);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "资产生成失败";
+      writeJson(res, 500, { error: message });
+    }
+    return;
+  }
+
+  if (req.method === "POST" && req.url === "/api/assets/export") {
+    try {
+      const body = await readJson(req);
+      const buffer = await buildAssetsWorkbook(body.assetPackage || body);
+      const filename = encodeURIComponent(`${sanitizeFilename(body?.assetPackage?.title || body?.title || "短剧")}_AI视觉资产清单_客户版.xlsx`);
+      res.writeHead(200, {
+        "Content-Type": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        "Content-Disposition": `attachment; filename*=UTF-8''${filename}`,
+        "Content-Length": buffer.length,
+      });
+      res.end(buffer);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Excel 导出失败";
       writeJson(res, 500, { error: message });
     }
     return;
@@ -530,6 +571,542 @@ function clampNumber(value, fallback) {
   const number = Number(value);
   if (!Number.isFinite(number)) return fallback;
   return Math.max(0, Math.min(100, Math.round(number)));
+}
+
+async function buildAssetsWithGemini(input) {
+  const model = process.env.GEMINI_MODEL || "gemini-2.5-flash";
+  const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${encodeURIComponent(process.env.GEMINI_API_KEY)}`;
+  const prompt = buildAssetsPrompt(input);
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), Number(process.env.GEMINI_TIMEOUT_MS || 160_000));
+  const response = await fetch(url, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    signal: controller.signal,
+    body: JSON.stringify({
+      contents: [{ role: "user", parts: [{ text: prompt }] }],
+      generationConfig: {
+        temperature: 0.28,
+        responseMimeType: "application/json",
+      },
+    }),
+  }).finally(() => clearTimeout(timeout));
+
+  if (!response.ok) {
+    const detail = await response.text();
+    throw new Error(`Gemini 资产分析失败：${response.status} ${detail.slice(0, 400)}`);
+  }
+
+  const data = await response.json();
+  const text = data?.candidates?.[0]?.content?.parts?.map((part) => part.text || "").join("") || "";
+  if (!text.trim()) throw new Error("Gemini 未返回资产内容。");
+  const parsed = JSON.parse(stripJsonFence(text));
+  const normalized = normalizeAssetPackage(parsed, input, "gemini");
+  if (String(input.generateImages || "") === "true" || input.generateImages === true) {
+    return await attachReferenceImages(normalized);
+  }
+  return normalized;
+}
+
+function buildAssetsPrompt(input) {
+  const rawScript = String(input.scriptText || "");
+  const script =
+    rawScript.length > 24000
+      ? `${rawScript.slice(0, 20000)}\n\n【中间内容已省略，以下为结尾片段】\n${rawScript.slice(-4000)}`
+      : rawScript;
+
+  return `
+你是AI真人短剧承制公司的“短剧人物资产专家”。用户上传剧本后，你要生成给客户审核的 AI视觉资产清单。请严格参考以下制片逻辑：
+
+一、业务流程
+剧本输入 → 提取基础资产 → 判断衍生资产 → 生成英文定妆/生图提示词 → 风险检查 → 导出客户审核 Excel → 客户确认后进入样片制作。
+
+二、资产判断规则
+1. 基础资产只包括稳定复用的人物、场景、道具，不要把瞬时动作、表情、眼泪、手部特写当成资产。
+2. 衍生资产是父资产的视觉状态变体，例如服装变体、战损状态、场景雨夜版、道具激活/破损版。
+3. 角色衍生只保留两类：服装变体、结构性外观变化。表情和情绪不建资产。
+4. 场景衍生只保留时间、天气、破坏、氛围状态变化。
+5. 道具衍生只保留激活、损坏、展开、发光、碎裂等可复用状态。
+6. 每个父资产最多 1-5 个衍生，宁缺勿滥。
+7. 对AI视频高风险内容要在风险检查里说明如何规避，例如多人同框、打斗、拥抱拉扯、巨兽、复杂法术、群像混乱。
+
+三、输出风格
+- 面向客户审核，专业、清晰、可落地。
+- 不要编造剧本没有的人物关系；如果信息不足，要用“待补充”说明。
+- 英文提示词必须适合真人短剧视觉参考图生成，竖屏 9:16，写实、定妆、无水印、无文字。
+- 所有 ID 必须稳定，英文小写加下划线，例如 role_yang_xuan、scene_crayfish_stall、tool_dragon_slayer_blade。
+
+剧本名称：${input.title || "未命名剧本"}
+
+剧本正文：
+${script || "用户未提供正文，请输出低置信度资产框架。"}
+
+只返回 JSON，不要 Markdown。JSON 结构必须完全如下：
+{
+  "title": "剧本名",
+  "summary": "一句话说明本次资产提取口径",
+  "baseAssets": [
+    {
+      "assetsId": "role_xxx",
+      "name": "资产名称",
+      "type": "role/scene/tool",
+      "function": "剧情功能",
+      "visualAnchor": "核心视觉锚点，用 / 分隔",
+      "consistencyRisk": "一致性风险",
+      "defaultState": "默认状态",
+      "promptEn": "英文定妆/生图提示词"
+    }
+  ],
+  "derivedAssets": [
+    {
+      "assetsId": "父资产ID",
+      "id": null,
+      "name": "2-6字状态名",
+      "desc": "与默认态差异 · 视觉特征",
+      "type": "role/scene/tool",
+      "reason": "为什么需要作为衍生资产",
+      "reuseScenes": "复用场景",
+      "promptEn": "英文定妆/生图提示词"
+    }
+  ],
+  "assetChecklist": [
+    {
+      "category": "角色/场景/道具",
+      "assetNo": "R_01 或 R_01_D1 或 S_01 或 T_01",
+      "name": "角色/资产名称",
+      "state": "资产状态",
+      "visualAnchor": "核心视觉锚点",
+      "imageStatus": "待生成/已生成/需人工补图",
+      "promptEn": "英文定妆/生图提示词",
+      "sourceAssetsId": "对应基础资产ID"
+    }
+  ],
+  "riskChecks": [
+    {
+      "content": "风险内容",
+      "judgement": "判断/修正"
+    }
+  ]
+}
+`;
+}
+
+function normalizeAssetPackage(pkg, input, source) {
+  const fallback = createFallbackAssetPackage(input, "");
+  const baseAssets = normalizeAssetsArray(pkg.baseAssets, fallback.baseAssets).slice(0, 30);
+  const derivedAssets = normalizeDerivedArray(pkg.derivedAssets, fallback.derivedAssets).slice(0, 60);
+  const assetChecklist = normalizeChecklistArray(pkg.assetChecklist, baseAssets, derivedAssets).slice(0, 90);
+  return {
+    title: String(pkg.title || input.title || fallback.title || "未命名剧本"),
+    generatedAt: new Date().toLocaleString("zh-CN", { hour12: false }),
+    summary: String(pkg.summary || fallback.summary),
+    source,
+    note: pkg.note || "",
+    baseAssets,
+    derivedAssets,
+    assetChecklist,
+    riskChecks: normalizeRiskChecks(pkg.riskChecks, fallback.riskChecks),
+  };
+}
+
+function normalizeAssetsArray(value, fallback) {
+  const rows = Array.isArray(value) && value.length ? value : fallback;
+  return rows.map((item, index) => {
+    const type = normalizeAssetType(item.type);
+    return {
+      assetsId: item.assetsId || `${type}_${slug(`${item.name || index + 1}`)}`,
+      name: String(item.name || `资产${index + 1}`),
+      type,
+      function: String(item.function || "待补充剧情功能"),
+      visualAnchor: String(item.visualAnchor || "待补充视觉锚点"),
+      consistencyRisk: String(item.consistencyRisk || "需在样片阶段复核一致性"),
+      defaultState: String(item.defaultState || "默认态"),
+      promptEn: String(item.promptEn || buildDefaultAssetPrompt(item.name, type, item.visualAnchor)),
+    };
+  });
+}
+
+function normalizeDerivedArray(value, fallback) {
+  const rows = Array.isArray(value) && value.length ? value : fallback;
+  return rows.map((item, index) => ({
+    assetsId: String(item.assetsId || ""),
+    id: item.id ?? null,
+    name: String(item.name || `衍生${index + 1}`).slice(0, 12),
+    desc: String(item.desc || "与默认态差异 · 待补充视觉特征"),
+    type: normalizeAssetType(item.type),
+    reason: String(item.reason || "该状态影响后续镜头一致性，需要单独固定。"),
+    reuseScenes: String(item.reuseScenes || "样片关键镜头"),
+    promptEn: String(item.promptEn || buildDefaultAssetPrompt(item.name, item.type, item.desc)),
+  }));
+}
+
+function normalizeChecklistArray(value, baseAssets, derivedAssets) {
+  if (Array.isArray(value) && value.length) {
+    return value.map((item) => ({
+      category: normalizeCategory(item.category || item.type),
+      assetNo: String(item.assetNo || ""),
+      name: String(item.name || ""),
+      state: String(item.state || "默认"),
+      visualAnchor: String(item.visualAnchor || ""),
+      imageStatus: String(item.imageStatus || "待生成"),
+      promptEn: String(item.promptEn || ""),
+      sourceAssetsId: String(item.sourceAssetsId || ""),
+      referenceImage: item.referenceImage || "",
+    }));
+  }
+
+  const counters = { role: 0, scene: 0, tool: 0 };
+  const baseRows = baseAssets.map((item) => {
+    counters[item.type] = (counters[item.type] || 0) + 1;
+    const prefix = item.type === "role" ? "R" : item.type === "scene" ? "S" : "T";
+    return {
+      category: normalizeCategory(item.type),
+      assetNo: `${prefix}_${String(counters[item.type]).padStart(2, "0")}`,
+      name: item.name,
+      state: `${item.defaultState || "默认"} (默认)`,
+      visualAnchor: item.visualAnchor,
+      imageStatus: "待生成",
+      promptEn: item.promptEn,
+      sourceAssetsId: item.assetsId,
+      referenceImage: "",
+    };
+  });
+
+  const byParent = new Map();
+  for (const row of baseRows) byParent.set(row.sourceAssetsId, { baseNo: row.assetNo, count: 0, category: row.category });
+  const derivedRows = derivedAssets.map((item) => {
+    const parent = byParent.get(item.assetsId) || { baseNo: item.type === "role" ? "R_00" : item.type === "scene" ? "S_00" : "T_00", count: 0, category: normalizeCategory(item.type) };
+    parent.count += 1;
+    byParent.set(item.assetsId, parent);
+    const base = baseAssets.find((asset) => asset.assetsId === item.assetsId);
+    return {
+      category: parent.category,
+      assetNo: `${parent.baseNo}_D${parent.count}`,
+      name: base?.name || item.assetsId || "衍生资产",
+      state: `${item.name} (衍生)`,
+      visualAnchor: item.desc.replace(/^与默认态差异\s*·\s*/, ""),
+      imageStatus: "待生成",
+      promptEn: item.promptEn,
+      sourceAssetsId: item.assetsId,
+      referenceImage: "",
+    };
+  });
+  return [...baseRows, ...derivedRows];
+}
+
+function normalizeRiskChecks(value, fallback) {
+  const rows = Array.isArray(value) && value.length ? value : fallback;
+  return rows.slice(0, 20).map((item) => ({
+    content: String(item.content || "待检查内容"),
+    judgement: String(item.judgement || "待补充判断"),
+  }));
+}
+
+function normalizeAssetType(type) {
+  const raw = String(type || "").toLowerCase();
+  if (raw.includes("scene")) return "scene";
+  if (raw.includes("tool") || raw.includes("prop")) return "tool";
+  return "role";
+}
+
+function normalizeCategory(category) {
+  const type = normalizeAssetType(category);
+  if (type === "scene") return "场景";
+  if (type === "tool") return "道具";
+  return "角色";
+}
+
+async function attachReferenceImages(assetPackage) {
+  const limit = Math.max(0, Math.min(12, Number(process.env.ASSET_IMAGE_LIMIT || 4)));
+  if (!process.env.GEMINI_API_KEY || !limit) return assetPackage;
+  const rows = assetPackage.assetChecklist.slice(0, limit);
+  for (const row of rows) {
+    try {
+      const image = await generateGeminiReferenceImage(row.promptEn || row.visualAnchor);
+      if (image) {
+        row.referenceImage = image;
+        row.imageStatus = "已生成";
+      }
+    } catch {
+      row.imageStatus = "提示词已生成";
+    }
+  }
+  return assetPackage;
+}
+
+async function generateGeminiReferenceImage(prompt) {
+  const model = process.env.GEMINI_IMAGE_MODEL || "gemini-2.5-flash-image";
+  const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${encodeURIComponent(process.env.GEMINI_API_KEY)}`;
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), Number(process.env.GEMINI_IMAGE_TIMEOUT_MS || 60_000));
+  const response = await fetch(url, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    signal: controller.signal,
+    body: JSON.stringify({
+      contents: [{ role: "user", parts: [{ text: `${prompt}\n\nGenerate one clean vertical 9:16 visual reference image for production review. No text, no watermark.` }] }],
+      generationConfig: {
+        responseModalities: ["TEXT", "IMAGE"],
+      },
+    }),
+  }).finally(() => clearTimeout(timeout));
+  if (!response.ok) return "";
+  const data = await response.json();
+  const parts = data?.candidates?.[0]?.content?.parts || [];
+  const imagePart = parts.find((part) => part?.inlineData?.data);
+  if (!imagePart) return "";
+  const mime = imagePart.inlineData.mimeType || "image/png";
+  return `data:${mime};base64,${imagePart.inlineData.data}`;
+}
+
+function createFallbackAssetPackage(input, note) {
+  const title = input.title || "未命名剧本";
+  const script = String(input.scriptText || "");
+  const isXianxia = /龙|仙|魔|宗门|灵力|刀气|秘境|战袍|龙/.test(script);
+  const isUrban = /豪门|千金|总裁|DNA|医院|公司|酒会|婚约/.test(script);
+  const leadName = extractLikelyName(script) || "主角";
+  const antagonist = /光头|混混|反派|恶霸/.test(script) ? "压迫者" : "反派";
+  const mainScene = isXianxia ? "关键战场" : isUrban ? "公开冲突场" : "核心冲突场";
+
+  const baseAssets = [
+    {
+      assetsId: `role_${slug(leadName)}`,
+      name: leadName,
+      type: "role",
+      function: "主角；承担开场代入、受压和反击主线。",
+      visualAnchor: "中国真人短剧主角 / 25-35岁 / 五官清晰 / 眼神有压迫感 / 服装与题材一致",
+      consistencyRisk: "主角出镜频率高，脸、发型和主场服装必须优先固定。",
+      defaultState: isXianxia ? "现代常服" : "主场常服",
+      promptEn: buildDefaultAssetPrompt(leadName, "role", "Chinese live-action short drama protagonist, sharp realistic face, consistent identity, main costume"),
+    },
+    {
+      assetsId: `role_${slug(antagonist)}`,
+      name: antagonist,
+      type: "role",
+      function: "制造压迫和第一轮冲突，推动主角反击。",
+      visualAnchor: "中国真人短剧反派 / 清晰压迫感 / 服装和身份一眼可辨",
+      consistencyRisk: "容易生成成普通路人，需要强化反派识别点。",
+      defaultState: "主场服装",
+      promptEn: buildDefaultAssetPrompt(antagonist, "role", "Chinese live-action short drama antagonist, recognizable oppressive presence"),
+    },
+    {
+      assetsId: `scene_${slug(mainScene)}`,
+      name: mainScene,
+      type: "scene",
+      function: "承载样片主冲突和客户审核视觉风格。",
+      visualAnchor: isXianxia ? "海面/礁石/雷暴/巨物压迫/冷暖对比" : "现代中国空间/围观压力/强冲突动线/真实光线",
+      consistencyRisk: "空间层次和人物站位需要固定，避免镜头切换后场景漂移。",
+      defaultState: "主场版",
+      promptEn: buildDefaultAssetPrompt(mainScene, "scene", isXianxia ? "storm ocean fantasy battlefield" : "modern Chinese conflict scene"),
+    },
+    {
+      assetsId: "tool_key_evidence",
+      name: isXianxia ? "核心武器" : "关键证据道具",
+      type: "tool",
+      function: "推动反转或战力展示，是样片可视化记忆点。",
+      visualAnchor: isXianxia ? "厚重长刀/能量纹路/高光状态" : "文件/戒指/录音/照片/可特写",
+      consistencyRisk: "道具形态容易漂移，需要固定大小、材质和特写方式。",
+      defaultState: "默认态",
+      promptEn: buildDefaultAssetPrompt(isXianxia ? "核心武器" : "关键证据道具", "tool", isXianxia ? "ancient heavy blade with energy patterns" : "realistic evidence prop for short drama close-up"),
+    },
+  ];
+  const derivedAssets = [
+    {
+      assetsId: baseAssets[0].assetsId,
+      id: null,
+      name: isXianxia ? "战斗态" : "高压态",
+      desc: isXianxia ? "与默认态差异 · 深色战斗服，衣摆被风掀起，能量光效围绕身体" : "与默认态差异 · 服装略凌乱，承压但眼神坚定，适合开场冲突",
+      type: "role",
+      reason: "主角默认态与样片高冲突状态差异明显，需要固定。",
+      reuseScenes: "第一集开场冲突；后续反击高光",
+      promptEn: buildDefaultAssetPrompt(`${leadName} ${isXianxia ? "battle state" : "pressure state"}`, "role", "same face identity, high-conflict production reference"),
+    },
+    {
+      assetsId: baseAssets[2].assetsId,
+      id: null,
+      name: isXianxia ? "风暴版" : "围堵版",
+      desc: isXianxia ? "与默认态差异 · 乌云压顶，冷光雷暴，地面或海面被战斗气流撕开" : "与默认态差异 · 围观人群压缩空间，主角处于低位，背景压暗",
+      type: "scene",
+      reason: "主场景情绪氛围影响整段视觉统一，需要作为样片参考。",
+      reuseScenes: "样片开场；第一轮冲突",
+      promptEn: buildDefaultAssetPrompt(`${mainScene} high conflict version`, "scene", "cinematic high-pressure atmosphere"),
+    },
+  ];
+  const assetChecklist = normalizeChecklistArray([], baseAssets, derivedAssets);
+  const riskChecks = [
+    { content: "多人同框、群体围堵或战斗群像", judgement: "高风险；客户审核阶段先固定主角、反派和主场景，正片多用1-3人同框。" },
+    { content: "表情、眼泪、手部特写", judgement: "不单独资产化；放入分镜提示词，避免资产表膨胀。" },
+    { content: "服装变化和场景天气变化", judgement: "需要作为衍生资产固定，否则样片前后容易漂移。" },
+  ];
+  return {
+    title,
+    generatedAt: new Date().toLocaleString("zh-CN", { hour12: false }),
+    summary: "按AI真人短剧样片制作口径提取基础资产、衍生资产和客户审核提示词。",
+    source: "local",
+    note,
+    baseAssets,
+    derivedAssets,
+    assetChecklist,
+    riskChecks,
+  };
+}
+
+function buildDefaultAssetPrompt(name, type, visual) {
+  const subject = type === "scene" ? "scene environment reference" : type === "tool" ? "prop reference" : "character reference";
+  return `Ultra photorealistic vertical 9:16 AI short drama ${subject}, ${name || "asset"}, ${visual || "clear visual anchor"}, cinematic lighting, realistic Chinese live-action production style, consistent identity, clean composition, no cartoon, no anime, no illustration, no watermark, no text.`;
+}
+
+function extractLikelyName(script) {
+  const match = script.match(/(?:男主|主角|女主)?[“"]?([\u4e00-\u9fa5]{2,4})[”"]?(?:冷笑|抬头|醒来|走进|说道|被|在|，)/);
+  return match?.[1] && !/第一|第二|第三|雨夜|镜头|场景|剧本/.test(match[1]) ? match[1] : "";
+}
+
+async function buildAssetsWorkbook(assetPackage) {
+  const pkg = normalizeAssetPackage(assetPackage || {}, assetPackage || {}, assetPackage?.source || "export");
+  const workbook = new ExcelJS.Workbook();
+  workbook.creator = "星驰AI—短剧智能体";
+  workbook.created = new Date();
+  buildClientAssetSheet(workbook, pkg);
+  buildBaseAssetsSheet(workbook, pkg);
+  buildDerivedAssetsSheet(workbook, pkg);
+  buildToolCallSheet(workbook, pkg);
+  buildRiskSheet(workbook, pkg);
+  const buffer = await workbook.xlsx.writeBuffer();
+  return Buffer.from(buffer);
+}
+
+function buildClientAssetSheet(workbook, pkg) {
+  const ws = workbook.addWorksheet("资产清单");
+  ws.columns = [
+    { width: 12 }, { width: 14 }, { width: 18 }, { width: 20 }, { width: 46 },
+    { width: 18 }, { width: 18 }, { width: 14 }, { width: 90 },
+  ];
+  ws.mergeCells("A1:I1");
+  ws.mergeCells("A2:I2");
+  ws.getCell("A1").value = `《${pkg.title}》AI视觉资产清单`;
+  ws.getCell("A2").value = `已生成 ${pkg.assetChecklist.length} 条资产；基础资产 ${pkg.baseAssets.length} 条；衍生资产 ${pkg.derivedAssets.length} 条。`;
+  ws.getRow(1).height = 28;
+  ws.getRow(2).height = 24;
+  ws.getRow(1).font = { bold: true, size: 18, color: { argb: "FF1B2329" } };
+  ws.getRow(2).font = { color: { argb: "FF5C6B73" } };
+  const header = ["资产大类", "资产编号", "角色/资产名称", "资产状态", "核心视觉锚点", "参考图", "三视图/补充图", "图片状态", "英文定妆/生图提示词 (Prompt)"];
+  ws.addRow(header);
+  styleHeader(ws.getRow(3));
+  pkg.assetChecklist.forEach((item, index) => {
+    const row = ws.addRow([
+      item.category,
+      item.assetNo,
+      item.name,
+      item.state,
+      item.visualAnchor,
+      item.referenceImage ? "" : "页面预览",
+      "",
+      item.imageStatus || "待生成",
+      item.promptEn,
+    ]);
+    row.height = item.referenceImage ? 95 : 44;
+    row.alignment = { vertical: "middle", wrapText: true };
+    if (item.referenceImage) embedImage(workbook, ws, item.referenceImage, 5, row.number - 1, 110, 85);
+    if (index % 2 === 1) row.eachCell((cell) => { cell.fill = solidFill("FFF8FAFB"); });
+  });
+  applySheetBorders(ws);
+}
+
+function buildBaseAssetsSheet(workbook, pkg) {
+  const ws = workbook.addWorksheet("基础资产表");
+  ws.columns = [{ width: 28 }, { width: 18 }, { width: 12 }, { width: 40 }, { width: 58 }, { width: 50 }];
+  ws.addRow(["assetsId", "name", "type", "function", "visualAnchor", "consistencyRisk"]);
+  styleHeader(ws.getRow(1));
+  pkg.baseAssets.forEach((item) => {
+    ws.addRow([item.assetsId, item.name, item.type, item.function, item.visualAnchor, item.consistencyRisk]);
+  });
+  styleBody(ws);
+}
+
+function buildDerivedAssetsSheet(workbook, pkg) {
+  const ws = workbook.addWorksheet("衍生资产表");
+  ws.columns = [{ width: 28 }, { width: 10 }, { width: 18 }, { width: 56 }, { width: 12 }, { width: 48 }, { width: 46 }];
+  ws.addRow(["assetsId", "id", "name", "desc", "type", "reason", "reuseScenes"]);
+  styleHeader(ws.getRow(1));
+  pkg.derivedAssets.forEach((item) => {
+    ws.addRow([item.assetsId, item.id, item.name, item.desc, item.type, item.reason, item.reuseScenes]);
+  });
+  styleBody(ws);
+}
+
+function buildToolCallSheet(workbook, pkg) {
+  const ws = workbook.addWorksheet("add_deriveAsset");
+  ws.columns = [{ width: 120 }];
+  ws.addRow(["模拟工具调用"]);
+  styleHeader(ws.getRow(1));
+  pkg.derivedAssets.forEach((item) => {
+    ws.addRow([`add_deriveAsset({assetsId: "${item.assetsId}", id: null, name: "${item.name}", desc: "${item.desc}", type: "${item.type}"})`]);
+  });
+  styleBody(ws);
+}
+
+function buildRiskSheet(workbook, pkg) {
+  const ws = workbook.addWorksheet("风险检查");
+  ws.columns = [{ width: 38 }, { width: 86 }];
+  ws.addRow(["内容", "判断/修正"]);
+  styleHeader(ws.getRow(1));
+  pkg.riskChecks.forEach((item) => ws.addRow([item.content, item.judgement]));
+  styleBody(ws);
+}
+
+function styleHeader(row) {
+  row.font = { bold: true, color: { argb: "FFFFFFFF" } };
+  row.alignment = { vertical: "middle", wrapText: true };
+  row.eachCell((cell) => {
+    cell.fill = solidFill("FF287381");
+    cell.border = thinBorder();
+  });
+}
+
+function styleBody(ws) {
+  ws.eachRow((row, index) => {
+    if (index === 1) return;
+    row.alignment = { vertical: "middle", wrapText: true };
+    if (index % 2 === 0) row.eachCell((cell) => { cell.fill = solidFill("FFF8FAFB"); });
+  });
+  applySheetBorders(ws);
+}
+
+function applySheetBorders(ws) {
+  ws.eachRow((row) => row.eachCell((cell) => { cell.border = thinBorder(); }));
+}
+
+function embedImage(workbook, ws, dataUrl, col, row, width, height) {
+  const match = String(dataUrl).match(/^data:image\/(png|jpeg|jpg);base64,(.+)$/i);
+  if (!match) return;
+  const extension = match[1].toLowerCase() === "jpg" ? "jpeg" : match[1].toLowerCase();
+  const imageId = workbook.addImage({ base64: dataUrl, extension });
+  ws.addImage(imageId, { tl: { col, row }, ext: { width, height } });
+}
+
+function thinBorder() {
+  return {
+    top: { style: "thin", color: { argb: "FFE1E7EC" } },
+    left: { style: "thin", color: { argb: "FFE1E7EC" } },
+    bottom: { style: "thin", color: { argb: "FFE1E7EC" } },
+    right: { style: "thin", color: { argb: "FFE1E7EC" } },
+  };
+}
+
+function solidFill(argb) {
+  return { type: "pattern", pattern: "solid", fgColor: { argb } };
+}
+
+function sanitizeFilename(value) {
+  return String(value || "短剧").replace(/[\\/:*?"<>|]/g, "").slice(0, 60) || "短剧";
+}
+
+function slug(value) {
+  return String(value || "asset")
+    .toLowerCase()
+    .replace(/[^a-z0-9\u4e00-\u9fa5]+/g, "_")
+    .replace(/^_+|_+$/g, "")
+    .slice(0, 48) || "asset";
 }
 
 function createFallbackReport(input, note) {

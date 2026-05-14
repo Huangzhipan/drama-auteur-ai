@@ -1,7 +1,7 @@
 import { ChangeEvent, useEffect, useMemo, useState } from "react";
 import mammoth from "mammoth";
 
-type View = "diagnose" | "report";
+type View = "diagnose" | "report" | "assets";
 
 type FormState = {
   title: string;
@@ -45,6 +45,57 @@ type DiagnosisReport = {
   note?: string;
 };
 
+type BaseAsset = {
+  assetsId: string;
+  name: string;
+  type: "role" | "scene" | "tool";
+  function: string;
+  visualAnchor: string;
+  consistencyRisk: string;
+  defaultState: string;
+  promptEn: string;
+};
+
+type DerivedAsset = {
+  assetsId: string;
+  id: number | null;
+  name: string;
+  desc: string;
+  type: "role" | "scene" | "tool";
+  reason: string;
+  reuseScenes: string;
+  promptEn: string;
+};
+
+type AssetChecklistItem = {
+  category: string;
+  assetNo: string;
+  name: string;
+  state: string;
+  visualAnchor: string;
+  imageStatus: string;
+  promptEn: string;
+  sourceAssetsId: string;
+  referenceImage?: string;
+};
+
+type RiskCheck = {
+  content: string;
+  judgement: string;
+};
+
+type AssetPackage = {
+  title: string;
+  generatedAt: string;
+  summary: string;
+  source?: string;
+  note?: string;
+  baseAssets: BaseAsset[];
+  derivedAssets: DerivedAsset[];
+  assetChecklist: AssetChecklistItem[];
+  riskChecks: RiskCheck[];
+};
+
 const initialForm: FormState = {
   title: "",
   scriptText: "",
@@ -62,6 +113,7 @@ const sampleScript = `# 至暗时刻
 结尾：妹妹的视频突然出现在大屏幕上，她说：“姐姐，别相信你身边的人。”`;
 
 const progressSteps = ["读取剧本", "提取商业卖点", "评估留存与付费点", "生成诊断报告"];
+const assetProgressSteps = ["读取剧本", "提取基础资产", "判断衍生状态", "生成客户资产表"];
 const generationLimit = 2;
 const generationCountKey = "xingchi-ai-diagnosis-count";
 const generationUnlockKey = "xingchi-ai-diagnosis-unlocked";
@@ -70,6 +122,14 @@ const diagnoseApiEndpoint =
   window.location.hostname === "localhost" || window.location.hostname === "127.0.0.1"
     ? "http://localhost:8787/api/diagnose"
     : "/api/diagnose";
+const assetsApiEndpoint =
+  window.location.hostname === "localhost" || window.location.hostname === "127.0.0.1"
+    ? "http://localhost:8787/api/assets"
+    : "/api/assets";
+const assetsExportApiEndpoint =
+  window.location.hostname === "localhost" || window.location.hostname === "127.0.0.1"
+    ? "http://localhost:8787/api/assets/export"
+    : "/api/assets/export";
 const redeemApiEndpoint =
   window.location.hostname === "localhost" || window.location.hostname === "127.0.0.1"
     ? "http://localhost:8787/api/redeem"
@@ -194,12 +254,103 @@ function getVisitorId() {
   return next;
 }
 
+function createLocalAssetPackage(form: FormState): AssetPackage {
+  const title = inferTitle(form) || "未命名剧本";
+  const script = form.scriptText;
+  const lead = script.match(/([\u4e00-\u9fa5]{2,4})(?:冷笑|抬头|醒来|走进|被|在)/)?.[1] || "主角";
+  const xianxia = /龙|仙|魔|宗门|灵力|刀气|秘境|战袍/.test(script);
+  const baseAssets: BaseAsset[] = [
+    {
+      assetsId: "role_main_character",
+      name: lead,
+      type: "role",
+      function: "承担主线代入、受压和反击。",
+      visualAnchor: "中国真人短剧主角 / 五官清晰 / 眼神坚定 / 主场服装稳定",
+      consistencyRisk: "出镜频率高，脸、发型和服装必须优先固定。",
+      defaultState: xianxia ? "现代常服" : "主场常服",
+      promptEn: `Ultra photorealistic vertical 9:16 AI short drama character reference, Chinese protagonist ${lead}, realistic face, consistent identity, main costume, cinematic lighting, no cartoon, no anime, no watermark, no text.`,
+    },
+    {
+      assetsId: "scene_main_conflict",
+      name: xianxia ? "关键战场" : "核心冲突场",
+      type: "scene",
+      function: "承载样片主冲突和客户视觉审核。",
+      visualAnchor: xianxia ? "雷暴 / 冷光 / 战斗压迫 / 强对比" : "现代中国空间 / 围观压力 / 真实光线 / 冲突动线",
+      consistencyRisk: "空间层次和人物站位需要固定，避免镜头切换后漂移。",
+      defaultState: "主场版",
+      promptEn: `Ultra photorealistic vertical 9:16 AI short drama scene reference, ${xianxia ? "storm fantasy battlefield" : "modern Chinese conflict location"}, cinematic lighting, clean composition, no watermark, no text.`,
+    },
+    {
+      assetsId: "tool_key_prop",
+      name: xianxia ? "核心武器" : "关键证据道具",
+      type: "tool",
+      function: "推动反转或战力展示。",
+      visualAnchor: xianxia ? "长刀 / 能量纹路 / 高光状态" : "文件 / 戒指 / 录音 / 可特写",
+      consistencyRisk: "道具形态容易漂移，需要固定大小、材质和特写方式。",
+      defaultState: "默认态",
+      promptEn: `Ultra photorealistic vertical 9:16 AI short drama prop reference, ${xianxia ? "ancient heavy blade with glowing energy patterns" : "realistic evidence prop close-up"}, cinematic texture, no watermark, no text.`,
+    },
+  ];
+  const derivedAssets: DerivedAsset[] = [
+    {
+      assetsId: "role_main_character",
+      id: null,
+      name: xianxia ? "战斗态" : "高压态",
+      desc: xianxia ? "与默认态差异 · 深色战斗服，衣摆被风掀起，能量光效围绕身体" : "与默认态差异 · 服装略凌乱，承压但眼神坚定",
+      type: "role",
+      reason: "主角默认态与样片高冲突状态差异明显，需要固定。",
+      reuseScenes: "第一集开场冲突；后续反击高光",
+      promptEn: `Ultra photorealistic vertical 9:16 AI short drama character reference, same face identity, ${xianxia ? "battle costume, energy aura" : "high pressure emotional state, slightly messy costume"}, cinematic lighting, no watermark, no text.`,
+    },
+  ];
+  const assetChecklist: AssetChecklistItem[] = [
+    ...baseAssets.map((asset, index) => ({
+      category: asset.type === "scene" ? "场景" : asset.type === "tool" ? "道具" : "角色",
+      assetNo: `${asset.type === "scene" ? "S" : asset.type === "tool" ? "T" : "R"}_${String(index + 1).padStart(2, "0")}`,
+      name: asset.name,
+      state: `${asset.defaultState} (默认)`,
+      visualAnchor: asset.visualAnchor,
+      imageStatus: "提示词已生成",
+      promptEn: asset.promptEn,
+      sourceAssetsId: asset.assetsId,
+    })),
+    {
+      category: "角色",
+      assetNo: "R_01_D1",
+      name: lead,
+      state: `${derivedAssets[0].name} (衍生)`,
+      visualAnchor: derivedAssets[0].desc.replace("与默认态差异 · ", ""),
+      imageStatus: "提示词已生成",
+      promptEn: derivedAssets[0].promptEn,
+      sourceAssetsId: derivedAssets[0].assetsId,
+    },
+  ];
+  return {
+    title,
+    generatedAt: new Date().toLocaleString("zh-CN", { hour12: false }),
+    summary: "本地规则已生成基础资产和衍生资产，建议补充完整第一集后复核。",
+    source: "local",
+    note: "Gemini 接口暂时不可用，当前为本地规则生成的资产清单。",
+    baseAssets,
+    derivedAssets,
+    assetChecklist,
+    riskChecks: [
+      { content: "表情、眼泪、手部特写", judgement: "不单独资产化，放入分镜提示词。" },
+      { content: "多人同框或复杂动作", judgement: "高风险，样片阶段控制在1-3个主体。" },
+    ],
+  };
+}
+
 function App() {
   const [view, setView] = useState<View>("diagnose");
   const [form, setForm] = useState<FormState>(initialForm);
   const [report, setReport] = useState<DiagnosisReport | null>(null);
+  const [assetPackage, setAssetPackage] = useState<AssetPackage | null>(null);
   const [isAnalyzing, setIsAnalyzing] = useState(false);
+  const [isGeneratingAssets, setIsGeneratingAssets] = useState(false);
+  const [isExportingAssets, setIsExportingAssets] = useState(false);
   const [progress, setProgress] = useState(0);
+  const [assetProgress, setAssetProgress] = useState(0);
   const [fileHint, setFileHint] = useState("");
   const [donateOpen, setDonateOpen] = useState(false);
   const [comingSoon, setComingSoon] = useState("");
@@ -213,6 +364,16 @@ function App() {
     }, 280);
     return () => window.clearInterval(timer);
   }, [isAnalyzing]);
+
+  useEffect(() => {
+    if (!isGeneratingAssets) return;
+    const startedAt = Date.now();
+    const timer = window.setInterval(() => {
+      const elapsed = Date.now() - startedAt;
+      setAssetProgress((prev) => Math.min(92, Math.max(prev, Math.round(elapsed / 120))));
+    }, 320);
+    return () => window.clearInterval(timer);
+  }, [isGeneratingAssets]);
 
   useEffect(() => {
     const visitorId = getVisitorId();
@@ -229,6 +390,13 @@ function App() {
     if (progress < 78) return 2;
     return 3;
   }, [progress]);
+
+  const activeAssetStep = useMemo(() => {
+    if (assetProgress < 25) return 0;
+    if (assetProgress < 52) return 1;
+    if (assetProgress < 78) return 2;
+    return 3;
+  }, [assetProgress]);
 
   const handleFile = async (event: ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0];
@@ -313,6 +481,74 @@ function App() {
     }
   };
 
+  const runAssetGeneration = async () => {
+    const scriptText = form.scriptText.trim();
+    if (!scriptText) return;
+    const usedCount = Number(window.localStorage.getItem(generationCountKey) || "0");
+    const isUnlocked = window.localStorage.getItem(generationUnlockKey) === "true";
+    if (!isUnlocked && usedCount >= generationLimit) {
+      setDonateOpen(true);
+      return;
+    }
+    setIsGeneratingAssets(true);
+    setAssetProgress(8);
+    try {
+      const response = await fetch(assetsApiEndpoint, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          title: inferTitle(form),
+          scriptText,
+          generateImages: true,
+        }),
+      });
+      if (!response.ok) throw new Error(`资产接口返回 ${response.status}`);
+      const nextPackage = await response.json();
+      setAssetProgress(100);
+      window.setTimeout(() => {
+        setAssetPackage(nextPackage);
+        if (!isUnlocked) {
+          window.localStorage.setItem(generationCountKey, String(usedCount + 1));
+        }
+        setIsGeneratingAssets(false);
+      }, 360);
+    } catch (error) {
+      console.warn("Asset generation failed.", error);
+      setAssetProgress(100);
+      window.setTimeout(() => {
+        setAssetPackage(createLocalAssetPackage(form));
+        if (!isUnlocked) {
+          window.localStorage.setItem(generationCountKey, String(usedCount + 1));
+        }
+        setIsGeneratingAssets(false);
+      }, 360);
+    }
+  };
+
+  const exportAssetsExcel = async () => {
+    if (!assetPackage) return;
+    setIsExportingAssets(true);
+    try {
+      const response = await fetch(assetsExportApiEndpoint, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ assetPackage }),
+      });
+      if (!response.ok) throw new Error(`导出接口返回 ${response.status}`);
+      const blob = await response.blob();
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement("a");
+      link.href = url;
+      link.download = `${assetPackage.title || "短剧"}_AI视觉资产清单_客户版.xlsx`;
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      URL.revokeObjectURL(url);
+    } finally {
+      setIsExportingAssets(false);
+    }
+  };
+
   const redeemAccess = async (code: string) => {
     const response = await fetch(redeemApiEndpoint, {
       method: "POST",
@@ -336,9 +572,11 @@ function App() {
   return (
     <div className="app-shell compact-shell">
       <TopBar
+        view={view}
         report={report}
         onReport={() => setView("report")}
         onNew={() => setView("diagnose")}
+        onAssets={() => setView("assets")}
         onComingSoon={setComingSoon}
       />
       <main className="main compact-main">
@@ -355,6 +593,21 @@ function App() {
           />
         )}
         {view === "report" && <Report report={report} onStart={() => setView("diagnose")} onExport={exportReport} />}
+        {view === "assets" && (
+          <AssetExpert
+            form={form}
+            setForm={setForm}
+            onFile={handleFile}
+            onRun={runAssetGeneration}
+            onExport={exportAssetsExcel}
+            isGenerating={isGeneratingAssets}
+            isExporting={isExportingAssets}
+            progress={assetProgress}
+            activeStep={activeAssetStep}
+            fileHint={fileHint}
+            assetPackage={assetPackage}
+          />
+        )}
       </main>
       {donateOpen && <DonateModal onClose={() => setDonateOpen(false)} onRedeem={redeemAccess} />}
       {comingSoon && <ComingSoonModal title={comingSoon} onClose={() => setComingSoon("")} />}
@@ -363,22 +616,26 @@ function App() {
 }
 
 function TopBar({
+  view,
   report,
   onReport,
   onNew,
+  onAssets,
   onComingSoon,
 }: {
+  view: View;
   report: DiagnosisReport | null;
   onReport: () => void;
   onNew: () => void;
+  onAssets: () => void;
   onComingSoon: (title: string) => void;
 }) {
   return (
     <header className="topbar compact-topbar">
       <button className="brand-button" onClick={onNew}>星驰AI—短剧智能体</button>
       <nav className="topnav compact-nav">
-        <button className="nav-tool active" onClick={onNew}>剧本商业诊断</button>
-        <button className="nav-tool" onClick={() => onComingSoon("短剧人物资产专家")}>短剧人物资产专家</button>
+        <button className={`nav-tool ${view === "diagnose" || view === "report" ? "active" : ""}`} onClick={onNew}>剧本商业诊断</button>
+        <button className={`nav-tool ${view === "assets" ? "active" : ""}`} onClick={onAssets}>短剧人物资产专家</button>
         <button className="nav-tool" onClick={() => onComingSoon("A+级剧本提示词专家")}>A+级剧本提示词专家</button>
       </nav>
       <div className="head-actions">
@@ -482,6 +739,227 @@ function Diagnose({
           </div>
         )}
       </section>
+    </section>
+  );
+}
+
+function AssetExpert({
+  form,
+  setForm,
+  onFile,
+  onRun,
+  onExport,
+  isGenerating,
+  isExporting,
+  progress,
+  activeStep,
+  fileHint,
+  assetPackage,
+}: {
+  form: FormState;
+  setForm: (fn: (prev: FormState) => FormState) => void;
+  onFile: (event: ChangeEvent<HTMLInputElement>) => void;
+  onRun: () => void;
+  onExport: () => void;
+  isGenerating: boolean;
+  isExporting: boolean;
+  progress: number;
+  activeStep: number;
+  fileHint: string;
+  assetPackage: AssetPackage | null;
+}) {
+  const canRun = Boolean(form.scriptText.trim());
+
+  return (
+    <section className="asset-page">
+      <div className="asset-hero">
+        <p className="eyebrow">客户审核资产入口</p>
+        <h1>先定资产，再进样片</h1>
+        <p className="subhead">根据剧本提取人物、场景、道具和衍生状态，生成客户可审核的AI视觉资产清单。</p>
+      </div>
+
+      <section className="asset-workbench">
+        <div className="asset-input-panel">
+          <div className="upload-zone compact-upload">
+            <input id="asset-file" type="file" accept=".txt,.md,.docx" onChange={onFile} />
+            <label htmlFor="asset-file">
+              <strong>拖拽或选择剧本文件</strong>
+              <span>支持 .docx、.txt、.md。优先上传第一集或样片段落，资产判断会更准确。</span>
+              <em>{form.fileName || "选择本地剧本"}</em>
+            </label>
+          </div>
+          <div className="script-input compact-script asset-script">
+            <div>
+              <h2>剧本文本</h2>
+              <button className="text-button" onClick={() => setForm((prev) => ({ ...prev, title: "至暗时刻", scriptText: sampleScript }))}>
+                填入示例
+              </button>
+            </div>
+            <textarea
+              value={form.scriptText}
+              onChange={(event) => setForm((prev) => ({ ...prev, scriptText: event.target.value }))}
+              placeholder="粘贴第一集剧本、样片段落或完整故事梗概。系统会先锁定可复用资产，不把情绪、动作和局部特写误判为资产。"
+            />
+            <div className="input-meta">
+              <span>{fileHint || "资产提取会优先识别人物、主场景、关键道具和稳定视觉状态。"}</span>
+              <span>{form.scriptText.trim().length} 字</span>
+            </div>
+          </div>
+        </div>
+
+        <div className="asset-rules-panel">
+          <h2>资产审核逻辑</h2>
+          <ul>
+            <li>只提取稳定复用的人物、场景、道具。</li>
+            <li>服装、战损、雨夜、激活、破损才进入衍生资产。</li>
+            <li>表情、眼泪、手部特写、临时动作不单独资产化。</li>
+            <li>输出客户版 Excel，审核通过后进入样片制作。</li>
+          </ul>
+          <button className="button primary" onClick={onRun} disabled={!canRun || isGenerating}>
+            {isGenerating ? "资产生成中" : "生成资产清单"}
+          </button>
+        </div>
+      </section>
+
+      {isGenerating && (
+        <div className="progress-panel asset-progress" aria-live="polite">
+          <div className="progress-head">
+            <strong>{progress}%</strong>
+            <span>{assetProgressSteps[activeStep]}</span>
+          </div>
+          <i><b style={{ width: `${progress}%` }} /></i>
+          <div className="progress-steps">
+            {assetProgressSteps.map((step, index) => (
+              <span className={index <= activeStep ? "active" : ""} key={step}>{step}</span>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {assetPackage ? (
+        <AssetResult assetPackage={assetPackage} onExport={onExport} isExporting={isExporting} />
+      ) : (
+        <div className="asset-empty">
+          <h2>等待剧本资产分析</h2>
+          <p>生成后会出现基础资产、衍生资产、客户审核表、风险检查和英文定妆提示词。</p>
+        </div>
+      )}
+    </section>
+  );
+}
+
+function AssetResult({
+  assetPackage,
+  onExport,
+  isExporting,
+}: {
+  assetPackage: AssetPackage;
+  onExport: () => void;
+  isExporting: boolean;
+}) {
+  const previewRows = assetPackage.assetChecklist.slice(0, 8);
+  return (
+    <section className="asset-result">
+      {assetPackage.note && <div className="report-note">{assetPackage.note}</div>}
+      <div className="asset-result-head">
+        <div>
+          <p className="eyebrow">AI视觉资产清单</p>
+          <h2>《{assetPackage.title}》客户审核版</h2>
+          <span>{assetPackage.summary}</span>
+        </div>
+        <button className="button primary" onClick={onExport} disabled={isExporting}>
+          {isExporting ? "导出中" : "导出Excel资产表"}
+        </button>
+      </div>
+
+      <div className="asset-stat-grid">
+        <AssetStat label="基础资产" value={assetPackage.baseAssets.length} />
+        <AssetStat label="衍生资产" value={assetPackage.derivedAssets.length} />
+        <AssetStat label="客户审核项" value={assetPackage.assetChecklist.length} />
+        <AssetStat label="风险检查" value={assetPackage.riskChecks.length} />
+      </div>
+
+      <div className="asset-preview-grid">
+        {previewRows.map((item) => (
+          <article className="asset-preview-card" key={`${item.assetNo}-${item.state}`}>
+            <div className="asset-preview-media">
+              {item.referenceImage ? (
+                <img src={item.referenceImage} alt={`${item.name}${item.state}`} />
+              ) : (
+                <span>{item.category}</span>
+              )}
+            </div>
+            <div>
+              <strong>{item.assetNo} · {item.name}</strong>
+              <p>{item.state}</p>
+              <em>{item.imageStatus}</em>
+            </div>
+          </article>
+        ))}
+      </div>
+
+      <div className="asset-tables">
+        <AssetTable
+          title="基础资产表"
+          headers={["assetsId", "名称", "类型", "剧情功能", "核心视觉锚点", "一致性风险"]}
+          rows={assetPackage.baseAssets.map((item) => [
+            item.assetsId,
+            item.name,
+            item.type,
+            item.function,
+            item.visualAnchor,
+            item.consistencyRisk,
+          ])}
+        />
+        <AssetTable
+          title="衍生资产表"
+          headers={["父资产ID", "状态名", "类型", "差异描述", "原因", "复用场景"]}
+          rows={assetPackage.derivedAssets.map((item) => [
+            item.assetsId,
+            item.name,
+            item.type,
+            item.desc,
+            item.reason,
+            item.reuseScenes,
+          ])}
+        />
+        <AssetTable
+          title="风险检查"
+          headers={["内容", "判断/修正"]}
+          rows={assetPackage.riskChecks.map((item) => [item.content, item.judgement])}
+        />
+      </div>
+    </section>
+  );
+}
+
+function AssetStat({ label, value }: { label: string; value: number }) {
+  return (
+    <div className="asset-stat">
+      <span>{label}</span>
+      <strong>{value}</strong>
+    </div>
+  );
+}
+
+function AssetTable({ title, headers, rows }: { title: string; headers: string[]; rows: string[][] }) {
+  return (
+    <section className="asset-table-wrap">
+      <h3>{title}</h3>
+      <div className="asset-table-scroll">
+        <table className="asset-table">
+          <thead>
+            <tr>{headers.map((header) => <th key={header}>{header}</th>)}</tr>
+          </thead>
+          <tbody>
+            {rows.map((row, index) => (
+              <tr key={`${title}-${index}`}>
+                {row.map((cell, cellIndex) => <td key={`${title}-${index}-${cellIndex}`}>{cell}</td>)}
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
     </section>
   );
 }
