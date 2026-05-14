@@ -77,6 +77,7 @@ type AssetChecklistItem = {
   promptEn: string;
   sourceAssetsId: string;
   referenceImage?: string;
+  imageModel?: string;
 };
 
 type RiskCheck = {
@@ -113,7 +114,7 @@ const sampleScript = `# 至暗时刻
 结尾：妹妹的视频突然出现在大屏幕上，她说：“姐姐，别相信你身边的人。”`;
 
 const progressSteps = ["读取剧本", "提取商业卖点", "评估留存与付费点", "生成诊断报告"];
-const assetProgressSteps = ["读取剧本", "提取基础资产", "判断衍生状态", "生成参考图", "生成客户资产表"];
+const assetProgressSteps = ["读取剧本", "提取基础资产", "判断衍生状态", "生成客户资产表"];
 const generationLimit = 2;
 const generationCountKey = "xingchi-ai-diagnosis-count";
 const generationUnlockKey = "xingchi-ai-diagnosis-unlocked";
@@ -130,6 +131,10 @@ const assetsExportApiEndpoint =
   window.location.hostname === "localhost" || window.location.hostname === "127.0.0.1"
     ? "http://localhost:8787/api/assets/export"
     : "/api/assets/export";
+const assetsImageApiEndpoint =
+  window.location.hostname === "localhost" || window.location.hostname === "127.0.0.1"
+    ? "http://localhost:8787/api/assets/image"
+    : "/api/assets/image";
 const redeemApiEndpoint =
   window.location.hostname === "localhost" || window.location.hostname === "127.0.0.1"
     ? "http://localhost:8787/api/redeem"
@@ -341,6 +346,15 @@ function createLocalAssetPackage(form: FormState): AssetPackage {
   };
 }
 
+function updateAssetChecklistItem(assetPackage: AssetPackage, index: number, patch: Partial<AssetChecklistItem>): AssetPackage {
+  return {
+    ...assetPackage,
+    assetChecklist: assetPackage.assetChecklist.map((item, itemIndex) => (
+      itemIndex === index ? { ...item, ...patch } : item
+    )),
+  };
+}
+
 function App() {
   const [view, setView] = useState<View>("diagnose");
   const [form, setForm] = useState<FormState>(initialForm);
@@ -349,6 +363,7 @@ function App() {
   const [isAnalyzing, setIsAnalyzing] = useState(false);
   const [isGeneratingAssets, setIsGeneratingAssets] = useState(false);
   const [isExportingAssets, setIsExportingAssets] = useState(false);
+  const [generatingAssetKey, setGeneratingAssetKey] = useState("");
   const [progress, setProgress] = useState(0);
   const [assetProgress, setAssetProgress] = useState(0);
   const [fileHint, setFileHint] = useState("");
@@ -392,11 +407,10 @@ function App() {
   }, [progress]);
 
   const activeAssetStep = useMemo(() => {
-    if (assetProgress < 20) return 0;
-    if (assetProgress < 44) return 1;
-    if (assetProgress < 66) return 2;
-    if (assetProgress < 88) return 3;
-    return 4;
+    if (assetProgress < 25) return 0;
+    if (assetProgress < 52) return 1;
+    if (assetProgress < 78) return 2;
+    return 3;
   }, [assetProgress]);
 
   const handleFile = async (event: ChangeEvent<HTMLInputElement>) => {
@@ -500,7 +514,7 @@ function App() {
         body: JSON.stringify({
           title: inferTitle(form),
           scriptText,
-          generateImages: true,
+          generateImages: false,
         }),
       });
       if (!response.ok) throw new Error(`资产接口返回 ${response.status}`);
@@ -523,6 +537,42 @@ function App() {
         }
         setIsGeneratingAssets(false);
       }, 360);
+    }
+  };
+
+  const generateAssetImage = async (item: AssetChecklistItem, index: number) => {
+    if (!assetPackage) return;
+    const key = `${item.assetNo}-${item.state}-${index}`;
+    setGeneratingAssetKey(key);
+    setAssetPackage((current) => current ? updateAssetChecklistItem(current, index, {
+      imageStatus: "生成中",
+    }) : current);
+    try {
+      const response = await fetch(assetsImageApiEndpoint, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          assetNo: item.assetNo,
+          name: item.name,
+          prompt: item.promptEn || item.visualAnchor,
+        }),
+      });
+      const result = await response.json().catch(() => ({}));
+      if (!response.ok || !result.referenceImage) {
+        throw new Error(result.error || `生图接口返回 ${response.status}`);
+      }
+      setAssetPackage((current) => current ? updateAssetChecklistItem(current, index, {
+        referenceImage: result.referenceImage,
+        imageModel: result.imageModel || "",
+        imageStatus: result.imageStatus || "已生成",
+      }) : current);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "生图失败";
+      setAssetPackage((current) => current ? updateAssetChecklistItem(current, index, {
+        imageStatus: `生成失败：${message.slice(0, 42)}`,
+      }) : current);
+    } finally {
+      setGeneratingAssetKey("");
     }
   };
 
@@ -601,8 +651,10 @@ function App() {
             onFile={handleFile}
             onRun={runAssetGeneration}
             onExport={exportAssetsExcel}
+            onGenerateImage={generateAssetImage}
             isGenerating={isGeneratingAssets}
             isExporting={isExportingAssets}
+            generatingAssetKey={generatingAssetKey}
             progress={assetProgress}
             activeStep={activeAssetStep}
             fileHint={fileHint}
@@ -750,8 +802,10 @@ function AssetExpert({
   onFile,
   onRun,
   onExport,
+  onGenerateImage,
   isGenerating,
   isExporting,
+  generatingAssetKey,
   progress,
   activeStep,
   fileHint,
@@ -762,8 +816,10 @@ function AssetExpert({
   onFile: (event: ChangeEvent<HTMLInputElement>) => void;
   onRun: () => void;
   onExport: () => void;
+  onGenerateImage: (item: AssetChecklistItem, index: number) => void;
   isGenerating: boolean;
   isExporting: boolean;
+  generatingAssetKey: string;
   progress: number;
   activeStep: number;
   fileHint: string;
@@ -814,10 +870,10 @@ function AssetExpert({
             <li>只提取稳定复用的人物、场景、道具。</li>
             <li>服装、战损、雨夜、激活、破损才进入衍生资产。</li>
             <li>表情、眼泪、手部特写、临时动作不单独资产化。</li>
-            <li>输出客户版 Excel，审核通过后进入样片制作。</li>
+            <li>先输出提示词和审核表，再按需逐张生成参考图。</li>
           </ul>
           <button className="button primary" onClick={onRun} disabled={!canRun || isGenerating}>
-            {isGenerating ? "资产生成中" : "生成资产清单"}
+            {isGenerating ? "资产清单生成中" : "生成资产清单和提示词"}
           </button>
         </div>
       </section>
@@ -834,12 +890,18 @@ function AssetExpert({
               <span className={index <= activeStep ? "active" : ""} key={step}>{step}</span>
             ))}
           </div>
-          <p className="progress-note">正在调用 Gemini 分析剧本并生成资产参考图，通常需要 1-3 分钟。</p>
+          <p className="progress-note">正在调用 Gemini 提取资产和提示词。图片改为逐张生成，清单会更快返回。</p>
         </div>
       )}
 
       {assetPackage ? (
-        <AssetResult assetPackage={assetPackage} onExport={onExport} isExporting={isExporting} />
+        <AssetResult
+          assetPackage={assetPackage}
+          onExport={onExport}
+          onGenerateImage={onGenerateImage}
+          isExporting={isExporting}
+          generatingAssetKey={generatingAssetKey}
+        />
       ) : (
         <div className="asset-empty">
           <h2>等待剧本资产分析</h2>
@@ -853,13 +915,17 @@ function AssetExpert({
 function AssetResult({
   assetPackage,
   onExport,
+  onGenerateImage,
   isExporting,
+  generatingAssetKey,
 }: {
   assetPackage: AssetPackage;
   onExport: () => void;
+  onGenerateImage: (item: AssetChecklistItem, index: number) => void;
   isExporting: boolean;
+  generatingAssetKey: string;
 }) {
-  const previewRows = assetPackage.assetChecklist.slice(0, 8);
+  const previewRows = assetPackage.assetChecklist;
   return (
     <section className="asset-result">
       {assetPackage.note && <div className="report-note">{assetPackage.note}</div>}
@@ -882,25 +948,55 @@ function AssetResult({
       </div>
 
       <div className="asset-preview-grid">
-        {previewRows.map((item) => (
-          <article className="asset-preview-card" key={`${item.assetNo}-${item.state}`}>
+        {previewRows.map((item, index) => {
+          const key = `${item.assetNo}-${item.state}-${index}`;
+          const isGenerating = generatingAssetKey === key;
+          return (
+          <article className="asset-preview-card" key={key}>
             <div className="asset-preview-media">
               {item.referenceImage ? (
                 <img src={item.referenceImage} alt={`${item.name}${item.state}`} />
               ) : (
-                <span>{item.category}</span>
+                <span>{isGenerating ? "生成中" : item.category}</span>
               )}
             </div>
             <div>
               <strong>{item.assetNo} · {item.name}</strong>
               <p>{item.state}</p>
               <em>{item.imageStatus}</em>
+              <small>模型：{item.imageModel || "未生成"}</small>
+              <p className="asset-anchor">{item.visualAnchor}</p>
+              <details className="asset-prompt">
+                <summary>查看英文提示词</summary>
+                <p>{item.promptEn}</p>
+              </details>
+              <button
+                className="button secondary asset-image-button"
+                onClick={() => onGenerateImage(item, index)}
+                disabled={Boolean(generatingAssetKey)}
+              >
+                {isGenerating ? "生成中" : item.referenceImage ? "重新生成参考图" : "生成参考图"}
+              </button>
             </div>
           </article>
-        ))}
+          );
+        })}
       </div>
 
       <div className="asset-tables">
+        <AssetTable
+          title="客户审核资产表"
+          headers={["编号", "名称", "状态", "视觉锚点", "图片状态", "生图模型", "英文提示词"]}
+          rows={assetPackage.assetChecklist.map((item) => [
+            item.assetNo,
+            item.name,
+            item.state,
+            item.visualAnchor,
+            item.imageStatus,
+            item.imageModel || "未生成",
+            item.promptEn,
+          ])}
+        />
         <AssetTable
           title="基础资产表"
           headers={["assetsId", "名称", "类型", "剧情功能", "核心视觉锚点", "一致性风险"]}

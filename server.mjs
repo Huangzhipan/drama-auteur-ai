@@ -171,6 +171,32 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
+  if (req.method === "POST" && req.url === "/api/assets/image") {
+    try {
+      const body = await readJson(req);
+      if (!process.env.GEMINI_API_KEY) {
+        writeJson(res, 400, { ok: false, error: "未检测到 GEMINI_API_KEY，无法生成资产参考图。" });
+        return;
+      }
+      const prompt = String(body.prompt || body.promptEn || body.visualAnchor || "").trim();
+      if (!prompt) {
+        writeJson(res, 400, { ok: false, error: "缺少生图提示词。" });
+        return;
+      }
+      const result = await generateGeminiReferenceImage(prompt);
+      writeJson(res, 200, {
+        ok: true,
+        referenceImage: result.image,
+        imageModel: result.model,
+        imageStatus: "已生成",
+      });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "生图失败";
+      writeJson(res, 500, { ok: false, error: message });
+    }
+    return;
+  }
+
   if (req.method === "POST" && req.url === "/api/assets/export") {
     try {
       const body = await readJson(req);
@@ -758,6 +784,7 @@ function normalizeChecklistArray(value, baseAssets, derivedAssets) {
       promptEn: String(item.promptEn || ""),
       sourceAssetsId: String(item.sourceAssetsId || ""),
       referenceImage: item.referenceImage || "",
+      imageModel: item.imageModel || "",
     }));
   }
 
@@ -775,6 +802,7 @@ function normalizeChecklistArray(value, baseAssets, derivedAssets) {
       promptEn: item.promptEn,
       sourceAssetsId: item.assetsId,
       referenceImage: "",
+      imageModel: "",
     };
   });
 
@@ -795,6 +823,7 @@ function normalizeChecklistArray(value, baseAssets, derivedAssets) {
       promptEn: item.promptEn,
       sourceAssetsId: item.assetsId,
       referenceImage: "",
+      imageModel: "",
     };
   });
   return [...baseRows, ...derivedRows];
@@ -835,7 +864,8 @@ async function attachReferenceImages(assetPackage) {
     try {
       const image = await generateGeminiReferenceImage(row.promptEn || row.visualAnchor);
       if (image) {
-        row.referenceImage = image;
+        row.referenceImage = image.image;
+        row.imageModel = image.model;
         row.imageStatus = "已生成";
       } else {
         row.imageStatus = "生图未返回图片";
@@ -854,8 +884,8 @@ async function generateGeminiReferenceImage(prompt) {
   const errors = [];
   for (const model of models) {
     try {
-      const image = await requestGeminiReferenceImage(model, prompt);
-      if (image) return image;
+      const result = await requestGeminiReferenceImage(model, prompt);
+      if (result?.image) return result;
       errors.push(`${model}: no image`);
     } catch (error) {
       const message = error instanceof Error ? error.message : "unknown error";
@@ -900,7 +930,10 @@ async function requestGeminiReferenceImage(model, prompt) {
   const imagePart = parts.find((part) => part?.inlineData?.data);
   if (!imagePart) return "";
   const mime = imagePart.inlineData.mimeType || "image/png";
-  return `data:${mime};base64,${imagePart.inlineData.data}`;
+  return {
+    image: `data:${mime};base64,${imagePart.inlineData.data}`,
+    model,
+  };
 }
 
 function compactErrorText(text) {

@@ -163,7 +163,7 @@
 
 .asset-preview-grid {
   display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
+  grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: 16px;
   margin-bottom: 30px;
 }
@@ -210,6 +210,46 @@
   color: #64737d;
   font-style: normal;
   line-height: 1.45;
+}
+
+.asset-preview-card small {
+  display: block;
+  margin-top: 8px;
+  color: #2c7b86;
+  font-weight: 800;
+  line-height: 1.45;
+}
+
+.asset-anchor {
+  min-height: 44px;
+  font-size: 13px;
+}
+
+.asset-prompt {
+  margin-top: 10px;
+  border-radius: 8px;
+  background: #eef6f7;
+  color: #465864;
+  font-size: 13px;
+  line-height: 1.55;
+}
+
+.asset-prompt summary {
+  cursor: pointer;
+  padding: 10px 12px;
+  color: #2c7b86;
+  font-weight: 900;
+}
+
+.asset-prompt p {
+  margin: 0;
+  padding: 0 12px 12px;
+  word-break: break-word;
+}
+
+.asset-image-button {
+  width: 100%;
+  margin-top: 12px;
 }
 
 .asset-tables {
