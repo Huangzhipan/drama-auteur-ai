@@ -202,7 +202,10 @@ const server = http.createServer(async (req, res) => {
 
   if (req.method === "POST" && req.url === "/api/assets/export") {
     try {
-      const body = await readJson(req);
+      const body = await readJson(req, {
+        maxBytes: 80_000_000,
+        tooLargeMessage: "导出内容过大，请先减少生成图片数量，或分批导出资产表。",
+      });
       const buffer = await buildAssetsWorkbook(body.assetPackage || body);
       const filename = encodeURIComponent(`${sanitizeFilename(body?.assetPackage?.title || body?.title || "短剧")}_AI视觉资产清单_客户版.xlsx`);
       res.writeHead(200, {
@@ -238,17 +241,25 @@ function writeJson(res, status, data) {
   res.end(JSON.stringify(data));
 }
 
-function readJson(req) {
+function readJson(req, options = {}) {
+  const maxBytes = options.maxBytes || 2_000_000;
+  const tooLargeMessage = options.tooLargeMessage || "剧本文本过长，请先提交前几集或故事大纲。";
   return new Promise((resolve, reject) => {
     let raw = "";
+    let bytes = 0;
+    let rejected = false;
     req.on("data", (chunk) => {
+      if (rejected) return;
       raw += chunk;
-      if (raw.length > 2_000_000) {
-        reject(new Error("剧本文本过长，请先提交前几集或故事大纲。"));
+      bytes += Buffer.byteLength(chunk);
+      if (bytes > maxBytes) {
+        rejected = true;
+        reject(new Error(tooLargeMessage));
         req.destroy();
       }
     });
     req.on("end", () => {
+      if (rejected) return;
       try {
         resolve(raw ? JSON.parse(raw) : {});
       } catch {
@@ -1425,44 +1436,54 @@ async function buildAssetsWorkbook(assetPackage) {
 
 function buildClientAssetSheet(workbook, pkg) {
   const ws = workbook.addWorksheet("资产清单");
+  applyWorksheetDefaults(ws, 3, "A4");
   ws.columns = [
-    { width: 12 }, { width: 14 }, { width: 18 }, { width: 20 }, { width: 46 },
-    { width: 18 }, { width: 18 }, { width: 14 }, { width: 90 },
+    { width: 10 }, { width: 14 }, { width: 18 }, { width: 18 }, { width: 44 },
+    { width: 25 }, { width: 25 }, { width: 14 }, { width: 70 },
   ];
   ws.mergeCells("A1:I1");
   ws.mergeCells("A2:I2");
+  const mainImageCount = pkg.assetChecklist.filter((item) => item.referenceImage).length;
+  const supplementImageCount = pkg.assetChecklist.filter((item) => item.threeViewImage || item.supplementImage).length;
+  const missingMainCount = pkg.assetChecklist.filter((item) => !item.referenceImage).length;
+  const needSupplementCount = pkg.assetChecklist.filter((item) => item.category === "角色" && item.threeViewStatus !== "不需要").length;
+  const missingSupplementCount = pkg.assetChecklist.filter((item) => (
+    item.category === "角色" && item.threeViewStatus !== "不需要" && !(item.threeViewImage || item.supplementImage)
+  )).length;
   ws.getCell("A1").value = `《${pkg.title}》AI视觉资产清单`;
-  ws.getCell("A2").value = `已生成 ${pkg.assetChecklist.length} 条资产；基础资产 ${pkg.baseAssets.length} 条；衍生资产 ${pkg.derivedAssets.length} 条。`;
-  ws.getRow(1).height = 28;
-  ws.getRow(2).height = 24;
-  ws.getRow(1).font = { bold: true, size: 18, color: { argb: "FF1B2329" } };
-  ws.getRow(2).font = { color: { argb: "FF5C6B73" } };
+  ws.getCell("A2").value = `已嵌入 ${mainImageCount} 张主参考图、${supplementImageCount} 张三视图/补充图；待补充主图：${missingMainCount ? `${missingMainCount} 张` : "无"}；待补充三视图：${needSupplementCount ? (missingSupplementCount ? `${missingSupplementCount} 张` : "无") : "无"}。`;
+  ws.getRow(1).height = 31;
+  ws.getRow(2).height = 27;
+  styleTitleRow(ws.getRow(1));
+  styleSummaryRow(ws.getRow(2));
   const header = ["资产大类", "资产编号", "角色/资产名称", "资产状态", "核心视觉锚点", "参考图", "三视图/补充图", "图片状态", "英文定妆/生图提示词 (Prompt)"];
   ws.addRow(header);
   styleHeader(ws.getRow(3));
   pkg.assetChecklist.forEach((item, index) => {
+    const supplementImage = item.threeViewImage || item.supplementImage;
+    const imageStatus = item.referenceImage ? "已匹配" : item.imageStatus || "待生成";
     const row = ws.addRow([
       item.category,
       item.assetNo,
       item.name,
       item.state,
       item.visualAnchor,
-      item.referenceImage ? "" : "页面预览",
-      item.threeViewStatus || "不需要",
-      item.imageStatus || "待生成",
+      item.referenceImage ? "" : "待生成",
+      supplementImage ? "" : item.threeViewStatus || "不需要",
+      imageStatus,
       item.imagePrompt || item.promptEn,
     ]);
-    row.height = item.referenceImage ? 95 : 44;
-    row.alignment = { vertical: "middle", wrapText: true };
-    if (item.referenceImage) embedImage(workbook, ws, item.referenceImage, 5, row.number - 1, 110, 85);
-    if (index % 2 === 1) row.eachCell((cell) => { cell.fill = solidFill("FFF8FAFB"); });
+    styleAssetListRow(row, index);
+    if (item.referenceImage) embedImage(workbook, ws, item.referenceImage, 5, row.number - 1, 150, 165);
+    if (supplementImage) embedImage(workbook, ws, supplementImage, 6, row.number - 1, 150, 165);
   });
   applySheetBorders(ws);
 }
 
 function buildBaseAssetsSheet(workbook, pkg) {
   const ws = workbook.addWorksheet("基础资产表");
-  ws.columns = [{ width: 28 }, { width: 18 }, { width: 12 }, { width: 40 }, { width: 58 }, { width: 50 }];
+  applyWorksheetDefaults(ws, 1, "A2");
+  ws.columns = [{ width: 24 }, { width: 18 }, { width: 10 }, { width: 42 }, { width: 54 }, { width: 42 }];
   ws.addRow(["assetsId", "name", "type", "function", "visualAnchor", "consistencyRisk"]);
   styleHeader(ws.getRow(1));
   pkg.baseAssets.forEach((item) => {
@@ -1473,7 +1494,8 @@ function buildBaseAssetsSheet(workbook, pkg) {
 
 function buildDerivedAssetsSheet(workbook, pkg) {
   const ws = workbook.addWorksheet("衍生资产表");
-  ws.columns = [{ width: 28 }, { width: 10 }, { width: 18 }, { width: 56 }, { width: 12 }, { width: 48 }, { width: 46 }];
+  applyWorksheetDefaults(ws, 1, "A2");
+  ws.columns = [{ width: 24 }, { width: 10 }, { width: 16 }, { width: 58 }, { width: 10 }, { width: 48 }, { width: 40 }];
   ws.addRow(["assetsId", "id", "name", "desc", "type", "reason", "reuseScenes"]);
   styleHeader(ws.getRow(1));
   pkg.derivedAssets.forEach((item) => {
@@ -1484,7 +1506,8 @@ function buildDerivedAssetsSheet(workbook, pkg) {
 
 function buildToolCallSheet(workbook, pkg) {
   const ws = workbook.addWorksheet("add_deriveAsset");
-  ws.columns = [{ width: 120 }];
+  applyWorksheetDefaults(ws, 1, "A2");
+  ws.columns = [{ width: 130 }];
   ws.addRow(["模拟工具调用"]);
   styleHeader(ws.getRow(1));
   pkg.derivedAssets.forEach((item) => {
@@ -1495,18 +1518,51 @@ function buildToolCallSheet(workbook, pkg) {
 
 function buildRiskSheet(workbook, pkg) {
   const ws = workbook.addWorksheet("风险检查");
-  ws.columns = [{ width: 38 }, { width: 86 }];
+  applyWorksheetDefaults(ws, 1, "A2");
+  ws.columns = [{ width: 30 }, { width: 90 }];
   ws.addRow(["内容", "判断/修正"]);
   styleHeader(ws.getRow(1));
   pkg.riskChecks.forEach((item) => ws.addRow([item.content, item.judgement]));
   styleBody(ws);
 }
 
-function styleHeader(row) {
-  row.font = { bold: true, color: { argb: "FFFFFFFF" } };
-  row.alignment = { vertical: "middle", wrapText: true };
+const TEMPLATE_FONT = { name: "PingFang SC", charset: 134 };
+
+function applyWorksheetDefaults(ws, ySplit = 1, topLeftCell = "A2") {
+  ws.properties.defaultRowHeight = 18;
+  ws.views = [{ state: "frozen", ySplit, topLeftCell, showGridLines: false }];
+  ws.pageSetup = {
+    orientation: "landscape",
+    fitToPage: true,
+    fitToWidth: 1,
+    fitToHeight: 0,
+    paperSize: 9,
+  };
+}
+
+function styleTitleRow(row) {
+  row.font = { ...TEMPLATE_FONT, bold: true, size: 18, color: { argb: "FFFFFFFF" } };
+  row.alignment = { vertical: "middle", horizontal: "center", wrapText: true };
   row.eachCell((cell) => {
-    cell.fill = solidFill("FF287381");
+    cell.fill = solidFill("FF1F2933");
+    cell.border = thinBorder();
+  });
+}
+
+function styleSummaryRow(row) {
+  row.font = { ...TEMPLATE_FONT, size: 10, color: { argb: "FF334155" } };
+  row.alignment = { vertical: "middle", horizontal: "center", wrapText: true };
+  row.eachCell((cell) => {
+    cell.fill = solidFill("FFE9EEF3");
+    cell.border = thinBorder();
+  });
+}
+
+function styleHeader(row) {
+  row.font = { ...TEMPLATE_FONT, bold: true, size: 10, color: { argb: "FFFFFFFF" } };
+  row.alignment = { vertical: "middle", horizontal: "center", wrapText: true };
+  row.eachCell((cell) => {
+    cell.fill = solidFill("FF2F5D62");
     cell.border = thinBorder();
   });
 }
@@ -1514,10 +1570,35 @@ function styleHeader(row) {
 function styleBody(ws) {
   ws.eachRow((row, index) => {
     if (index === 1) return;
-    row.alignment = { vertical: "middle", wrapText: true };
-    if (index % 2 === 0) row.eachCell((cell) => { cell.fill = solidFill("FFF8FAFB"); });
+    row.height = 52;
+    row.font = { ...TEMPLATE_FONT, size: 9, color: { argb: "FF374151" } };
+    row.alignment = { vertical: "middle", horizontal: "left", wrapText: true };
+    if (index % 2 === 0) row.eachCell((cell) => { cell.fill = solidFill("FFF8FAFC"); });
   });
   applySheetBorders(ws);
+}
+
+function styleAssetListRow(row, index) {
+  row.height = 178;
+  row.font = { ...TEMPLATE_FONT, size: 9, color: { argb: "FF374151" } };
+  row.alignment = { vertical: "middle", wrapText: true };
+  row.eachCell((cell, colNumber) => {
+    cell.border = thinBorder();
+    cell.alignment = {
+      vertical: "middle",
+      horizontal: [5, 9].includes(colNumber) ? "left" : "center",
+      wrapText: true,
+    };
+    if (index % 2 === 1) cell.fill = solidFill("FFF8FAFC");
+    if ([6, 7].includes(colNumber)) {
+      cell.fill = solidFill("FFFFF4D6");
+      cell.font = { ...TEMPLATE_FONT, bold: true, size: 9, color: { argb: "FF9A6700" } };
+    }
+    if (colNumber === 8 && row.getCell(8).value === "已匹配") {
+      cell.fill = solidFill("FFE7F4EA");
+      cell.font = { ...TEMPLATE_FONT, bold: true, size: 9, color: { argb: "FF1E7E34" } };
+    }
+  });
 }
 
 function applySheetBorders(ws) {
@@ -1534,10 +1615,10 @@ function embedImage(workbook, ws, dataUrl, col, row, width, height) {
 
 function thinBorder() {
   return {
-    top: { style: "thin", color: { argb: "FFE1E7EC" } },
-    left: { style: "thin", color: { argb: "FFE1E7EC" } },
-    bottom: { style: "thin", color: { argb: "FFE1E7EC" } },
-    right: { style: "thin", color: { argb: "FFE1E7EC" } },
+    top: { style: "thin", color: { argb: "FFD0D7DE" } },
+    left: { style: "thin", color: { argb: "FFD0D7DE" } },
+    bottom: { style: "thin", color: { argb: "FFD0D7DE" } },
+    right: { style: "thin", color: { argb: "FFD0D7DE" } },
   };
 }
 

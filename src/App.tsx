@@ -622,6 +622,9 @@ function App() {
       link.click();
       link.remove();
       URL.revokeObjectURL(url);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "导出失败";
+      window.alert(`Excel 导出失败：${message}`);
     } finally {
       setIsExportingAssets(false);
     }
