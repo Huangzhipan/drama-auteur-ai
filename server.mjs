@@ -835,19 +835,28 @@ async function attachReferenceImages(assetPackage) {
 }
 
 async function generateGeminiReferenceImage(prompt) {
-  const model = process.env.GEMINI_IMAGE_MODEL || "gemini-2.5-flash-image";
+  const model = process.env.GEMINI_IMAGE_MODEL || "gemini-3.1-flash-image-preview";
   const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${encodeURIComponent(process.env.GEMINI_API_KEY)}`;
   const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), Number(process.env.GEMINI_IMAGE_TIMEOUT_MS || 60_000));
+  const timeout = setTimeout(() => controller.abort(), Number(process.env.GEMINI_IMAGE_TIMEOUT_MS || 90_000));
+  const generationConfig = {
+    responseModalities: ["TEXT", "IMAGE"],
+  };
+  if (model.includes("3.1")) {
+    generationConfig.responseFormat = {
+      image: {
+        aspectRatio: "9:16",
+        imageSize: "1K",
+      },
+    };
+  }
   const response = await fetch(url, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     signal: controller.signal,
     body: JSON.stringify({
       contents: [{ role: "user", parts: [{ text: `${prompt}\n\nGenerate one clean vertical 9:16 visual reference image for production review. No text, no watermark.` }] }],
-      generationConfig: {
-        responseModalities: ["TEXT", "IMAGE"],
-      },
+      generationConfig,
     }),
   }).finally(() => clearTimeout(timeout));
   if (!response.ok) return "";

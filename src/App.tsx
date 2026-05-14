@@ -113,7 +113,7 @@ const sampleScript = `# 至暗时刻
 结尾：妹妹的视频突然出现在大屏幕上，她说：“姐姐，别相信你身边的人。”`;
 
 const progressSteps = ["读取剧本", "提取商业卖点", "评估留存与付费点", "生成诊断报告"];
-const assetProgressSteps = ["读取剧本", "提取基础资产", "判断衍生状态", "生成客户资产表"];
+const assetProgressSteps = ["读取剧本", "提取基础资产", "判断衍生状态", "生成参考图", "生成客户资产表"];
 const generationLimit = 2;
 const generationCountKey = "xingchi-ai-diagnosis-count";
 const generationUnlockKey = "xingchi-ai-diagnosis-unlocked";
@@ -392,10 +392,11 @@ function App() {
   }, [progress]);
 
   const activeAssetStep = useMemo(() => {
-    if (assetProgress < 25) return 0;
-    if (assetProgress < 52) return 1;
-    if (assetProgress < 78) return 2;
-    return 3;
+    if (assetProgress < 20) return 0;
+    if (assetProgress < 44) return 1;
+    if (assetProgress < 66) return 2;
+    if (assetProgress < 88) return 3;
+    return 4;
   }, [assetProgress]);
 
   const handleFile = async (event: ChangeEvent<HTMLInputElement>) => {
@@ -833,6 +834,7 @@ function AssetExpert({
               <span className={index <= activeStep ? "active" : ""} key={step}>{step}</span>
             ))}
           </div>
+          <p className="progress-note">正在调用 Gemini 分析剧本并生成资产参考图，通常需要 1-3 分钟。</p>
         </div>
       )}
 
