@@ -711,6 +711,25 @@ function buildVideoPromptsPrompt(input) {
 - firstFramePrompt/lastFramePrompt 必须能单独拿去生图，画面稳定、构图明确、角色位置清楚。
 - splitSuggestion 必须是真正可复制的子镜头方案，不能只写“建议拆镜”。
 - 负面提示词要结合该镜头风险补充，不只给通用模板。
+- 禁止输出一句话短提示词。videoPrompt 必须 180-360 个中文字符；firstFramePrompt 和 lastFramePrompt 必须 120-240 个中文字符；transitionPrompt 必须 120-240 个中文字符。
+- videoPrompt 必须按这个结构写成一段完整执行口令：画面风格 + 场景 + 承接上镜 + 景别/运镜 + 空间站位/朝向 + 动作链 + 动作终态 + 光影 + 情绪 + 台词/无台词。
+- 首帧/尾帧不是摘要，必须写成可直接生图的画面提示词，包含竖屏9:16、真人短剧、主体位置、姿态、表情、服装、环境、光影、禁止文字水印。
+- 如果是首尾帧或拆镜，必须写清楚“首帧静止状态”和“尾帧稳定终态”，不要只描述过程。
+
+高质量示例，不要照抄剧情，只学习粒度和写法：
+{
+  "visualGoal": "恶龙击碎光罩，小队被重击倒飞",
+  "continuity": "承接上镜：蓝色能量罩已经撑起，恶龙从画面右上方俯冲压近",
+  "orientation": "斩龙小队固定画面左下方朝右上防御；恶龙固定画面右上方朝左下俯冲；天奇位于小队前排偏左，半跪朝右上",
+  "action": "恶龙压低俯冲→龙尾横扫蓝色能量罩→能量罩碎裂成蓝色光屑→小队向左后方倒飞",
+  "finalState": "小队成员分散砸在礁石上，天奇半跪吐血，蓝色光屑消散，恶龙仍在上方压迫",
+  "recommendedMode": "split",
+  "videoPrompt": "真人短剧电影质感，东海秘境海岸战场，承接上镜蓝色能量罩撑起的状态。中远景快速跟拍，斩龙小队固定在画面左下方朝右上防御，恶龙从画面右上方朝左下俯冲。动作链：恶龙压低俯冲，龙尾横扫蓝色能量罩，能量罩碎裂成蓝色光屑，小队向左后方倒飞砸上礁石。动作终态：天奇半跪吐血，其他队员倒在礁石上，恶龙仍在上方盘旋压迫。乌云顶光压暗，龙焰橙红反光映在海面和人物边缘，紧张危急，无台词。",
+  "firstFramePrompt": "竖屏9:16真人短剧首帧图，东海秘境海岸战场，蓝色能量罩已经撑起，八名斩龙使在画面左下方集体防御，天奇位于前排偏左，恶龙在画面右上方俯冲前一瞬，乌云压顶，海浪翻涌，冷蓝侧光和橙红龙焰反光，人物脸部可见，无文字无水印。",
+  "lastFramePrompt": "竖屏9:16真人短剧尾帧图，同一东海秘境海岸战场，同一人物和站位方向。蓝色能量罩已经碎裂成光屑，天奇半跪在礁石上吐血，其他斩龙使倒在周围，恶龙仍在画面右上方盘旋压迫，海面掀浪，乌云冷光，动作完成后的稳定终态，无文字无水印。",
+  "transitionPrompt": "以首帧为起点、尾帧为终点，只完成一个核心变化：恶龙俯冲横扫光罩，光罩破碎，小队倒飞落地。保持同一恶龙位置、同一斩龙小队服装、同一海岸空间和同一视轴，不换脸，不新增人物，动作前0.5秒保持蓄势，动作后0.5秒停在倒地终态。",
+  "splitSuggestion": "拆分为：1. 恶龙俯冲接近光罩；2. 龙尾扫过，蓝色光罩破碎；3. 小队倒飞砸入礁石；4. 天奇半跪吐血反应镜头。"
+}
 
 风险评分规则：
 - 0-30：低风险，推荐 text
@@ -812,8 +831,8 @@ function normalizePromptShots(value, fallback) {
   const rows = Array.isArray(value) && value.length ? value : fallback;
   return rows.map((item, index) => {
     const risk = scoreShotRisk(item);
-    const recommendedMode = normalizePromptMode(item.recommendedMode || risk.mode);
-    return {
+    const recommendedMode = strongerPromptMode(normalizePromptMode(item.recommendedMode || risk.mode), risk.mode);
+    const normalized = {
       shotId: String(item.shotId || `SHOT_${String(index + 1).padStart(2, "0")}`),
       sequence: clampInt(item.sequence || index + 1, 1, 999, index + 1),
       scene: String(item.scene || "核心冲突场"),
@@ -829,7 +848,7 @@ function normalizePromptShots(value, fallback) {
       lighting: String(item.lighting || "真实中国短剧光影，面部清楚，背景轻微虚化"),
       dialogue: String(item.dialogue || item.lines || "无台词"),
       recommendedMode,
-      riskScore: clampNumber(item.riskScore, risk.score),
+      riskScore: Math.max(clampNumber(item.riskScore, risk.score), risk.score),
       riskReasons: normalizeArray(item.riskReasons, risk.reasons).slice(0, 6).map(String),
       videoPrompt: String(item.videoPrompt || buildDefaultVideoPrompt(item)),
       firstFramePrompt: String(item.firstFramePrompt || buildDefaultFirstFramePrompt(item)),
@@ -838,7 +857,105 @@ function normalizePromptShots(value, fallback) {
       negativePrompt: String(item.negativePrompt || defaultVideoNegativePrompt()),
       splitSuggestion: String(item.splitSuggestion || "如生成不稳定，拆为起势镜头、动作结果镜头、反应镜头。"),
     };
+    return enrichPromptShot(normalized);
   });
+}
+
+function strongerPromptMode(current, riskMode) {
+  const rank = { text: 0, first_frame: 1, first_last_frame: 2, split: 3 };
+  return rank[riskMode] > rank[current] ? riskMode : current;
+}
+
+function enrichPromptShot(shot) {
+  const enriched = { ...shot };
+  if (needsDetailedPrompt(enriched.videoPrompt, 150, ["真人", "承接", "动作", "终态", "光影"])) {
+    enriched.videoPrompt = buildDetailedShotVideoPrompt(enriched);
+  }
+  if (needsDetailedPrompt(enriched.firstFramePrompt, 110, ["竖屏", "首帧", "真人", "无文字"])) {
+    enriched.firstFramePrompt = buildDetailedShotFirstFramePrompt(enriched);
+  }
+  if (needsDetailedPrompt(enriched.lastFramePrompt, 110, ["竖屏", "尾帧", "终态", "无文字"])) {
+    enriched.lastFramePrompt = buildDetailedShotLastFramePrompt(enriched);
+  }
+  if (needsDetailedPrompt(enriched.transitionPrompt, 100, ["首帧", "尾帧", "同一", "不跳轴"])) {
+    enriched.transitionPrompt = buildDetailedShotTransitionPrompt(enriched);
+  }
+  if (needsDetailedPrompt(enriched.splitSuggestion, 45, ["1", "2"])) {
+    enriched.splitSuggestion = buildDetailedShotSplitSuggestion(enriched);
+  }
+  enriched.negativePrompt = mergeVideoNegativePrompt(enriched.negativePrompt, enriched);
+  return enriched;
+}
+
+function needsDetailedPrompt(text, minLength, requiredTerms = []) {
+  const value = String(text || "").trim();
+  if (value.length < minLength) return true;
+  return requiredTerms.some((term) => !value.includes(term));
+}
+
+function buildDetailedShotVideoPrompt(shot) {
+  const dialogue = shot.dialogue && shot.dialogue !== "无台词" ? `台词原文：${shot.dialogue}。` : "无台词。";
+  return [
+    `真人短剧电影质感，${shot.scene}，${shot.continuity}。`,
+    `${shot.shotSize}，${shot.cameraMove}，画面目标：${shot.visualGoal}。`,
+    `空间站位与朝向锁定：${shot.orientation}。`,
+    `动作链：${shot.action}。`,
+    `动作终态：${shot.finalState}。`,
+    `光影：${shot.lighting}。`,
+    `情绪：${shot.emotion}，${dialogue}`,
+  ].join("");
+}
+
+function buildDetailedShotFirstFramePrompt(shot) {
+  return [
+    `竖屏9:16真人短剧首帧图，${shot.scene}，${shot.visualGoal}。`,
+    `动作开始前的稳定瞬间，${shot.continuity}。`,
+    `主体位置和朝向：${shot.orientation}。`,
+    `角色保持同一脸型、同一服装、同一发型，姿态稳定，表情服务于“${shot.emotion}”。`,
+    `${shot.lighting}，前景/中景/背景层次清楚，画面不要文字、不要水印。`,
+  ].join("");
+}
+
+function buildDetailedShotLastFramePrompt(shot) {
+  return [
+    `竖屏9:16真人短剧尾帧图，${shot.scene}，承接同一人物、同一服装、同一空间和同一视轴。`,
+    `动作完成后的稳定终态：${shot.finalState}。`,
+    `左右站位和角色朝向不互换：${shot.orientation}。`,
+    `${shot.lighting}，主体面部清楚，画面停在可接下一镜的结果状态，禁止文字水印。`,
+  ].join("");
+}
+
+function buildDetailedShotTransitionPrompt(shot) {
+  return [
+    `以首帧为起点、尾帧为终点，只完成一个核心动作链：${shot.action}。`,
+    `全程保持同脸、同服装、同空间、同站位和180度视轴。`,
+    `动作前0.5秒保持稳定，动作中不要新增无关人物或道具，动作后0.5秒停在终态：${shot.finalState}。`,
+    `不跳轴、不换脸、不穿模、不让主体突然消失。`,
+  ].join("");
+}
+
+function buildDetailedShotSplitSuggestion(shot) {
+  return [
+    `拆分为：1. 建立空间和站位：${shot.orientation}`,
+    `2. 动作起势：${firstActionBeat(shot.action)}`,
+    `3. 动作结果：${shot.finalState}`,
+    `4. 如有台词或反应，单独补一个近景反应镜头，保持同一视轴和同一光影。`,
+  ].join("；");
+}
+
+function firstActionBeat(action) {
+  return String(action || "主体进入动作开始状态").split("→")[0].replace(/｜朝向：.+$/, "").trim() || "主体进入动作开始状态";
+}
+
+function mergeVideoNegativePrompt(text, shot) {
+  const parts = [
+    String(text || defaultVideoNegativePrompt()),
+    "不要一句话生成复杂动作，不要左右站位互换，不要错误朝向，不要人物穿模，不要多余手臂，不要手指畸形，不要动漫插画，不要文字水印，不要过暗看不清脸。",
+  ];
+  if (shot.riskScore >= 80 || shot.recommendedMode === "split") {
+    parts.push("不要一镜完成复杂碰撞/打斗/法术，不要多人融合，不要特效遮脸，不要主体突然消失。");
+  }
+  return Array.from(new Set(parts.join("，").split(/[，,]/).map((part) => part.trim()).filter(Boolean))).join("，");
 }
 
 function scoreShotRisk(item) {
