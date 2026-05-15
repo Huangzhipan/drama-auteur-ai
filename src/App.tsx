@@ -1,7 +1,7 @@
 import { ChangeEvent, useEffect, useMemo, useState } from "react";
 import mammoth from "mammoth";
 
-type View = "diagnose" | "report" | "assets";
+type View = "diagnose" | "report" | "assets" | "prompts";
 
 type FormState = {
   title: string;
@@ -117,6 +117,46 @@ type AssetPackage = {
   riskChecks: RiskCheck[];
 };
 
+type PromptMode = "auto" | "text" | "first_frame" | "first_last_frame" | "split";
+type PromptPlatform = "universal" | "kling" | "seedance" | "runway";
+
+type PromptShot = {
+  shotId: string;
+  sequence: number;
+  scene: string;
+  duration: string;
+  shotSize: string;
+  cameraMove: string;
+  visualGoal: string;
+  continuity: string;
+  orientation: string;
+  action: string;
+  finalState: string;
+  emotion: string;
+  lighting: string;
+  dialogue: string;
+  recommendedMode: PromptMode;
+  riskScore: number;
+  riskReasons: string[];
+  videoPrompt: string;
+  firstFramePrompt: string;
+  lastFramePrompt: string;
+  transitionPrompt: string;
+  negativePrompt: string;
+  splitSuggestion: string;
+};
+
+type PromptPackage = {
+  title: string;
+  generatedAt: string;
+  summary: string;
+  platform: PromptPlatform;
+  source?: string;
+  note?: string;
+  globalRules: string[];
+  shots: PromptShot[];
+};
+
 type ImageStyle = "real_short_drama" | "cinematic_real" | "ancient_real" | "anime_concept";
 type ImageModelChoice = "auto" | "gemini-3.1-flash-image-preview" | "gemini-2.5-flash-image";
 
@@ -138,6 +178,7 @@ const sampleScript = `# 至暗时刻
 
 const progressSteps = ["读取剧本", "提取商业卖点", "评估留存与付费点", "生成诊断报告"];
 const assetProgressSteps = ["读取剧本", "提取基础资产", "判断衍生状态", "生成客户资产表"];
+const promptProgressSteps = ["读取剧本", "拆分镜头", "判断生成模式", "生成提示词"];
 const generationLimit = 2;
 const generationCountKey = "xingchi-ai-diagnosis-count";
 const generationUnlockKey = "xingchi-ai-diagnosis-unlocked";
@@ -158,6 +199,10 @@ const assetsImageApiEndpoint =
   window.location.hostname === "localhost" || window.location.hostname === "127.0.0.1"
     ? "http://localhost:8787/api/assets/image"
     : "/api/assets/image";
+const promptsApiEndpoint =
+  window.location.hostname === "localhost" || window.location.hostname === "127.0.0.1"
+    ? "http://localhost:8787/api/prompts"
+    : "/api/prompts";
 const redeemApiEndpoint =
   window.location.hostname === "localhost" || window.location.hostname === "127.0.0.1"
     ? "http://localhost:8787/api/redeem"
@@ -369,6 +414,60 @@ function createLocalAssetPackage(form: FormState): AssetPackage {
   };
 }
 
+function createLocalPromptPackage(form: FormState, platform: PromptPlatform = "universal"): PromptPackage {
+  const title = inferTitle(form) || "未命名剧本";
+  const script = form.scriptText.trim();
+  const sceneParts = script
+    .split(/\n(?=第[一二三四五六七八九十0-9]+[场幕集]|场景|△|- )/)
+    .map((part) => part.trim())
+    .filter(Boolean)
+    .slice(0, 8);
+  const parts = sceneParts.length ? sceneParts : [script.slice(0, 320) || "主角进入核心冲突场。"];
+  const shots = parts.flatMap((part, index) => {
+    const lines = part.match(/「([^」]+)」|“([^”]+)”|"([^"]+)"/g)?.slice(0, 1).join(" ") || "无台词";
+    const risky = /打|推|抓|抱|摔|跪|倒|跑|追|刺|爆|雷|法术|飞|撞|群|围攻|血|光门|变身/.test(part);
+    const riskScore = risky ? 72 : 28;
+    const recommendedMode: PromptMode = riskScore >= 80 ? "split" : riskScore >= 60 ? "first_last_frame" : riskScore >= 35 ? "first_frame" : "text";
+    const scene = part.match(/(?:在|到|进入|来到)([\u4e00-\u9fa5]{2,10})(?:，|。|里|中)/)?.[1] || (index === 0 ? "核心冲突场" : `场景${index + 1}`);
+    const visualGoal = part.replace(/\s+/g, " ").slice(0, 90);
+    return [{
+      shotId: `SHOT_${String(index + 1).padStart(2, "0")}`,
+      sequence: index + 1,
+      scene,
+      duration: lines === "无台词" ? "4秒" : "5秒",
+      shotSize: index === 0 ? "中景" : "中近景",
+      cameraMove: risky ? "轻微推近，动作幅度克制" : "静止或轻微缓推",
+      visualGoal,
+      continuity: index === 0 ? "开篇镜头" : "承接上一镜动作终态，角色位置不跳变",
+      orientation: "主角固定画面左侧，3/4正面朝右；对手或目标固定画面右侧，3/4正面朝左",
+      action: risky ? "角色先停顿蓄势，再完成一个明确动作，动作结束后自然收住" : "角色保持当前位置，完成一次可见表情或视线变化",
+      finalState: risky ? "动作完成后双方距离拉开，站位仍保持左右关系" : "角色视线落在对方或关键道具上，情绪停住",
+      emotion: risky ? "压迫、反击临界点" : "克制、悬疑、紧张",
+      lighting: "中国真人短剧质感，真实环境光，面部清楚，背景轻微虚化",
+      dialogue: lines,
+      recommendedMode,
+      riskScore,
+      riskReasons: risky ? ["存在动作或特效风险", "需要锁定首尾状态"] : ["动作简单", "适合全局文本生成"],
+      videoPrompt: `真人短剧质感，${scene}，${index === 0 ? "开篇镜头" : "承接上一镜"}。${visualGoal}。镜头为${index === 0 ? "中景" : "中近景"}，${risky ? "轻微推近，动作幅度克制" : "静止或轻微缓推"}。主角固定画面左侧，3/4正面朝右，对手或目标固定画面右侧，3/4正面朝左。动作：${risky ? "先停顿蓄势，再完成一个明确动作，最终自然收住" : "保持当前位置，完成一次可见视线或表情变化"}。真实光影，面部清楚，背景虚化。`,
+      firstFramePrompt: `竖屏9:16真人短剧首帧图，${scene}，${visualGoal}。主角位于画面左侧，3/4正面朝右，身体处于动作开始前的稳定状态。真实中国短剧质感，面部清楚，无文字无水印。`,
+      lastFramePrompt: `竖屏9:16真人短剧尾帧图，${scene}，承接同一空间和同一人物身份。动作已经完成，角色停在明确终态，左右站位不变。真实光影，面部清楚，无文字无水印。`,
+      transitionPrompt: `以首帧为起点、尾帧为终点，角色只完成一个核心动作，保持同一人物身份、同一服装、同一空间和左右站位，不跳轴，不突然换脸。`,
+      negativePrompt: "不要动漫，不要插画，不要换脸，不要左右站位互换，不要多人融合，不要多余手臂，不要手指畸形，不要人物穿模，不要文字水印，不要过暗看不清脸。",
+      splitSuggestion: risky ? "建议拆为：起势镜头 / 动作结果镜头 / 对方反应镜头。" : "无需拆镜，可直接生成。",
+    }];
+  });
+  return {
+    title,
+    generatedAt: new Date().toLocaleString("zh-CN", { hour12: false }),
+    summary: "本地规则已按镜头风险生成可复制视频提示词；建议用 Gemini 版复核细节。",
+    platform,
+    source: "local",
+    note: "Gemini 暂时不可用，当前为本地规则生成的第一版提示词。",
+    globalRules: ["同一场戏保持180度视轴", "每镜只做一个核心动作", "复杂打斗和特效优先首尾帧或拆镜", "人物脸、服装、站位不得漂移"],
+    shots,
+  };
+}
+
 function updateAssetChecklistItem(assetPackage: AssetPackage, index: number, patch: Partial<AssetChecklistItem>): AssetPackage {
   return {
     ...assetPackage,
@@ -383,14 +482,19 @@ function App() {
   const [form, setForm] = useState<FormState>(initialForm);
   const [report, setReport] = useState<DiagnosisReport | null>(null);
   const [assetPackage, setAssetPackage] = useState<AssetPackage | null>(null);
+  const [promptPackage, setPromptPackage] = useState<PromptPackage | null>(null);
   const [isAnalyzing, setIsAnalyzing] = useState(false);
   const [isGeneratingAssets, setIsGeneratingAssets] = useState(false);
+  const [isGeneratingPrompts, setIsGeneratingPrompts] = useState(false);
   const [isExportingAssets, setIsExportingAssets] = useState(false);
   const [generatingAssetKey, setGeneratingAssetKey] = useState("");
   const [imageStyle, setImageStyle] = useState<ImageStyle>("real_short_drama");
   const [imageModelChoice, setImageModelChoice] = useState<ImageModelChoice>("auto");
+  const [promptPlatform, setPromptPlatform] = useState<PromptPlatform>("kling");
+  const [promptModeOverrides, setPromptModeOverrides] = useState<Record<string, PromptMode>>({});
   const [progress, setProgress] = useState(0);
   const [assetProgress, setAssetProgress] = useState(0);
+  const [promptProgress, setPromptProgress] = useState(0);
   const [fileHint, setFileHint] = useState("");
   const [donateOpen, setDonateOpen] = useState(false);
   const [comingSoon, setComingSoon] = useState("");
@@ -416,6 +520,16 @@ function App() {
   }, [isGeneratingAssets]);
 
   useEffect(() => {
+    if (!isGeneratingPrompts) return;
+    const startedAt = Date.now();
+    const timer = window.setInterval(() => {
+      const elapsed = Date.now() - startedAt;
+      setPromptProgress((prev) => Math.min(92, Math.max(prev, Math.round(elapsed / 110))));
+    }, 300);
+    return () => window.clearInterval(timer);
+  }, [isGeneratingPrompts]);
+
+  useEffect(() => {
     const visitorId = getVisitorId();
     fetch(visitApiEndpoint, {
       method: "POST",
@@ -437,6 +551,13 @@ function App() {
     if (assetProgress < 78) return 2;
     return 3;
   }, [assetProgress]);
+
+  const activePromptStep = useMemo(() => {
+    if (promptProgress < 25) return 0;
+    if (promptProgress < 52) return 1;
+    if (promptProgress < 78) return 2;
+    return 3;
+  }, [promptProgress]);
 
   const handleFile = async (event: ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0];
@@ -565,6 +686,65 @@ function App() {
     }
   };
 
+  const runPromptGeneration = async () => {
+    const scriptText = form.scriptText.trim();
+    if (!scriptText) return;
+    const usedCount = Number(window.localStorage.getItem(generationCountKey) || "0");
+    const isUnlocked = window.localStorage.getItem(generationUnlockKey) === "true";
+    if (!isUnlocked && usedCount >= generationLimit) {
+      setDonateOpen(true);
+      return;
+    }
+    setIsGeneratingPrompts(true);
+    setPromptProgress(8);
+    setPromptModeOverrides({});
+    try {
+      const response = await fetch(promptsApiEndpoint, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          title: inferTitle(form),
+          scriptText,
+          platform: promptPlatform,
+        }),
+      });
+      if (!response.ok) throw new Error(`提示词接口返回 ${response.status}`);
+      const nextPackage = await response.json();
+      setPromptProgress(100);
+      window.setTimeout(() => {
+        setPromptPackage(nextPackage);
+        if (!isUnlocked) {
+          window.localStorage.setItem(generationCountKey, String(usedCount + 1));
+        }
+        setIsGeneratingPrompts(false);
+      }, 360);
+    } catch (error) {
+      console.warn("Prompt generation failed.", error);
+      setPromptProgress(100);
+      window.setTimeout(() => {
+        setPromptPackage(createLocalPromptPackage(form, promptPlatform));
+        if (!isUnlocked) {
+          window.localStorage.setItem(generationCountKey, String(usedCount + 1));
+        }
+        setIsGeneratingPrompts(false);
+      }, 360);
+    }
+  };
+
+  const copyText = async (text: string) => {
+    if (!text.trim()) return;
+    try {
+      await navigator.clipboard.writeText(text);
+    } catch {
+      const textarea = document.createElement("textarea");
+      textarea.value = text;
+      document.body.appendChild(textarea);
+      textarea.select();
+      document.execCommand("copy");
+      textarea.remove();
+    }
+  };
+
   const generateAssetImage = async (item: AssetChecklistItem, index: number) => {
     if (!assetPackage) return;
     const key = `${item.assetNo}-${item.state}-${index}`;
@@ -658,6 +838,7 @@ function App() {
         onReport={() => setView("report")}
         onNew={() => setView("diagnose")}
         onAssets={() => setView("assets")}
+        onPrompts={() => setView("prompts")}
         onComingSoon={setComingSoon}
       />
       <main className="main compact-main">
@@ -695,6 +876,24 @@ function App() {
             assetPackage={assetPackage}
           />
         )}
+        {view === "prompts" && (
+          <PromptExpert
+            form={form}
+            setForm={setForm}
+            onFile={handleFile}
+            onRun={runPromptGeneration}
+            isGenerating={isGeneratingPrompts}
+            progress={promptProgress}
+            activeStep={activePromptStep}
+            fileHint={fileHint}
+            promptPackage={promptPackage}
+            platform={promptPlatform}
+            setPlatform={setPromptPlatform}
+            modeOverrides={promptModeOverrides}
+            setModeOverrides={setPromptModeOverrides}
+            onCopy={copyText}
+          />
+        )}
       </main>
       {donateOpen && <DonateModal onClose={() => setDonateOpen(false)} onRedeem={redeemAccess} />}
       {comingSoon && <ComingSoonModal title={comingSoon} onClose={() => setComingSoon("")} />}
@@ -708,6 +907,7 @@ function TopBar({
   onReport,
   onNew,
   onAssets,
+  onPrompts,
   onComingSoon,
 }: {
   view: View;
@@ -715,6 +915,7 @@ function TopBar({
   onReport: () => void;
   onNew: () => void;
   onAssets: () => void;
+  onPrompts: () => void;
   onComingSoon: (title: string) => void;
 }) {
   return (
@@ -723,7 +924,7 @@ function TopBar({
       <nav className="topnav compact-nav">
         <button className={`nav-tool ${view === "diagnose" || view === "report" ? "active" : ""}`} onClick={onNew}>剧本商业诊断</button>
         <button className={`nav-tool ${view === "assets" ? "active" : ""}`} onClick={onAssets}>短剧人物资产专家</button>
-        <button className="nav-tool" onClick={() => onComingSoon("A+级剧本提示词专家")}>A+级剧本提示词专家</button>
+        <button className={`nav-tool ${view === "prompts" ? "active" : ""}`} onClick={onPrompts}>A+级剧本提示词专家</button>
       </nav>
       <div className="head-actions">
         <button className="button secondary" onClick={onReport} disabled={!report}>查看报告</button>
@@ -1140,6 +1341,266 @@ function AssetTable({ title, headers, rows }: { title: string; headers: string[]
       </div>
     </section>
   );
+}
+
+function PromptExpert({
+  form,
+  setForm,
+  onFile,
+  onRun,
+  isGenerating,
+  progress,
+  activeStep,
+  fileHint,
+  promptPackage,
+  platform,
+  setPlatform,
+  modeOverrides,
+  setModeOverrides,
+  onCopy,
+}: {
+  form: FormState;
+  setForm: (fn: (prev: FormState) => FormState) => void;
+  onFile: (event: ChangeEvent<HTMLInputElement>) => void;
+  onRun: () => void;
+  isGenerating: boolean;
+  progress: number;
+  activeStep: number;
+  fileHint: string;
+  promptPackage: PromptPackage | null;
+  platform: PromptPlatform;
+  setPlatform: (value: PromptPlatform) => void;
+  modeOverrides: Record<string, PromptMode>;
+  setModeOverrides: (value: Record<string, PromptMode>) => void;
+  onCopy: (text: string) => void;
+}) {
+  const canRun = Boolean(form.scriptText.trim());
+  return (
+    <section className="prompt-page">
+      <div className="asset-hero prompt-hero">
+        <p className="eyebrow">视频生成执行入口</p>
+        <h1>先拆镜，再决定怎么生成</h1>
+        <p className="subhead">把剧本拆成标准镜头，自动判断全局文本、首帧、首尾帧或拆镜方案，并输出可直接复制到视频平台的提示词。</p>
+      </div>
+
+      <section className="asset-workbench">
+        <div className="asset-input-panel">
+          <div className="upload-zone compact-upload">
+            <input id="prompt-file" type="file" accept=".txt,.md,.docx" onChange={onFile} />
+            <label htmlFor="prompt-file">
+              <strong>拖拽或选择剧本文件</strong>
+              <span>建议上传第一集或样片段落。系统会重点锁定上一镜承接、朝向、动作终态和首尾帧。</span>
+              <em>{form.fileName || "选择本地剧本"}</em>
+            </label>
+          </div>
+          <div className="script-input compact-script asset-script">
+            <div>
+              <h2>剧本文本</h2>
+              <button className="text-button" onClick={() => setForm((prev) => ({ ...prev, title: "至暗时刻", scriptText: sampleScript }))}>
+                填入示例
+              </button>
+            </div>
+            <textarea
+              value={form.scriptText}
+              onChange={(event) => setForm((prev) => ({ ...prev, scriptText: event.target.value }))}
+              placeholder="粘贴需要生成视频提示词的剧本。复杂动作会自动建议首尾帧或拆镜。"
+            />
+            <div className="input-meta">
+              <span>{fileHint || "提示词会按镜头拆分，不建议一次塞入太多动作。"}</span>
+              <span>{form.scriptText.trim().length} 字</span>
+            </div>
+          </div>
+        </div>
+
+        <div className="asset-rules-panel prompt-rules">
+          <h2>生成策略</h2>
+          <label>
+            <span>目标平台</span>
+            <select value={platform} onChange={(event) => setPlatform(event.target.value as PromptPlatform)}>
+              <option value="kling">可灵 / Kling</option>
+              <option value="seedance">Seedance</option>
+              <option value="runway">Runway</option>
+              <option value="universal">通用视频平台</option>
+            </select>
+          </label>
+          <ul>
+            <li>简单对话和空镜优先全局文本生成。</li>
+            <li>人物一致性强的镜头建议首帧驱动。</li>
+            <li>打斗、推搡、转身、法术、状态变化优先首尾帧。</li>
+            <li>极复杂镜头直接给拆镜建议，避免硬抽。</li>
+          </ul>
+          <button className="button primary" onClick={onRun} disabled={!canRun || isGenerating}>
+            {isGenerating ? "提示词生成中" : "生成分镜提示词"}
+          </button>
+        </div>
+      </section>
+
+      {isGenerating && (
+        <div className="progress-panel asset-progress" aria-live="polite">
+          <div className="progress-head">
+            <strong>{progress}%</strong>
+            <span>{promptProgressSteps[activeStep]}</span>
+          </div>
+          <i><b style={{ width: `${progress}%` }} /></i>
+          <div className="progress-steps">
+            {promptProgressSteps.map((step, index) => (
+              <span className={index <= activeStep ? "active" : ""} key={step}>{step}</span>
+            ))}
+          </div>
+          <p className="progress-note">正在拆镜并判断全局生成、首帧、首尾帧或拆镜方案。</p>
+        </div>
+      )}
+
+      {promptPackage ? (
+        <PromptResult
+          promptPackage={promptPackage}
+          modeOverrides={modeOverrides}
+          setModeOverrides={setModeOverrides}
+          onCopy={onCopy}
+        />
+      ) : (
+        <div className="asset-empty">
+          <h2>等待生成分镜提示词</h2>
+          <p>生成后会出现风险评分、推荐生成方式、正向提示词、负面提示词、首帧和尾帧提示词。</p>
+        </div>
+      )}
+    </section>
+  );
+}
+
+function PromptResult({
+  promptPackage,
+  modeOverrides,
+  setModeOverrides,
+  onCopy,
+}: {
+  promptPackage: PromptPackage;
+  modeOverrides: Record<string, PromptMode>;
+  setModeOverrides: (value: Record<string, PromptMode>) => void;
+  onCopy: (text: string) => void;
+}) {
+  const highRiskCount = promptPackage.shots.filter((shot) => shot.riskScore >= 60).length;
+  return (
+    <section className="prompt-result asset-result">
+      {promptPackage.note && <div className="report-note">{promptPackage.note}</div>}
+      <div className="asset-result-head">
+        <div>
+          <p className="eyebrow">分镜提示词执行表</p>
+          <h2>《{promptPackage.title}》视频生成提示词</h2>
+          <span>{promptPackage.summary}</span>
+        </div>
+        <button className="button secondary" onClick={() => onCopy(buildAllPromptText(promptPackage, modeOverrides))}>复制整集提示词</button>
+      </div>
+      <div className="asset-stat-grid">
+        <AssetStat label="镜头数量" value={promptPackage.shots.length} />
+        <AssetStat label="高风险镜头" value={highRiskCount} />
+        <AssetStat label="首尾帧建议" value={promptPackage.shots.filter((shot) => shot.recommendedMode === "first_last_frame").length} />
+        <AssetStat label="拆镜建议" value={promptPackage.shots.filter((shot) => shot.recommendedMode === "split").length} />
+      </div>
+      <div className="prompt-global-rules">
+        {promptPackage.globalRules.map((rule) => <span key={rule}>{rule}</span>)}
+      </div>
+      <div className="prompt-shot-list">
+        {promptPackage.shots.map((shot) => {
+          const selectedMode = modeOverrides[shot.shotId] || shot.recommendedMode;
+          const copyText = buildShotCopyText(shot, selectedMode);
+          return (
+            <article className="prompt-shot-card" key={shot.shotId}>
+              <div className="prompt-shot-head">
+                <div>
+                  <p className="eyebrow">{shot.shotId} · {shot.scene}</p>
+                  <h3>{shot.visualGoal}</h3>
+                </div>
+                <span className={`risk-pill ${shot.riskScore >= 80 ? "danger" : shot.riskScore >= 60 ? "warning" : "safe"}`}>
+                  风险 {shot.riskScore}/100
+                </span>
+              </div>
+              <div className="prompt-meta-grid">
+                <span>推荐：{modeLabel(shot.recommendedMode)}</span>
+                <span>景别：{shot.shotSize}</span>
+                <span>时长：{shot.duration}</span>
+                <span>运镜：{shot.cameraMove}</span>
+              </div>
+              <label className="prompt-mode-select">
+                <span>生成方式</span>
+                <select
+                  value={selectedMode}
+                  onChange={(event) => setModeOverrides({ ...modeOverrides, [shot.shotId]: event.target.value as PromptMode })}
+                >
+                  <option value="text">全局文本生成</option>
+                  <option value="first_frame">首帧驱动</option>
+                  <option value="first_last_frame">首尾帧控制</option>
+                  <option value="split">拆镜方案</option>
+                </select>
+              </label>
+              <div className="prompt-risk-reasons">
+                {shot.riskReasons.map((reason) => <span key={reason}>{reason}</span>)}
+              </div>
+              <PromptBlock title="视频正向提示词" text={shot.videoPrompt} onCopy={onCopy} />
+              {(selectedMode === "first_frame" || selectedMode === "first_last_frame") && (
+                <PromptBlock title="首帧图提示词" text={shot.firstFramePrompt} onCopy={onCopy} />
+              )}
+              {selectedMode === "first_last_frame" && (
+                <>
+                  <PromptBlock title="尾帧图提示词" text={shot.lastFramePrompt} onCopy={onCopy} />
+                  <PromptBlock title="首尾帧过渡提示词" text={shot.transitionPrompt} onCopy={onCopy} />
+                </>
+              )}
+              {selectedMode === "split" && <PromptBlock title="拆镜建议" text={shot.splitSuggestion} onCopy={onCopy} />}
+              <PromptBlock title="负面提示词" text={shot.negativePrompt} onCopy={onCopy} />
+              <button className="button primary prompt-copy-all" onClick={() => onCopy(copyText)}>复制当前镜头全部内容</button>
+            </article>
+          );
+        })}
+      </div>
+    </section>
+  );
+}
+
+function PromptBlock({ title, text, onCopy }: { title: string; text: string; onCopy: (text: string) => void }) {
+  return (
+    <section className="prompt-block">
+      <div>
+        <strong>{title}</strong>
+        <button className="text-button" onClick={() => onCopy(text)}>一键复制</button>
+      </div>
+      <p>{text || "暂无"}</p>
+    </section>
+  );
+}
+
+function modeLabel(mode: PromptMode) {
+  if (mode === "first_last_frame") return "首尾帧控制";
+  if (mode === "first_frame") return "首帧驱动";
+  if (mode === "split") return "建议拆镜";
+  if (mode === "auto") return "自动判断";
+  return "全局文本生成";
+}
+
+function buildShotCopyText(shot: PromptShot, mode: PromptMode) {
+  const rows = [
+    `【${shot.shotId}｜${modeLabel(mode)}】`,
+    `场景：${shot.scene}`,
+    `景别/运镜/时长：${shot.shotSize}｜${shot.cameraMove}｜${shot.duration}`,
+    `连续性：${shot.continuity}`,
+    `朝向：${shot.orientation}`,
+    `动作终态：${shot.finalState}`,
+    `视频正向提示词：${shot.videoPrompt}`,
+  ];
+  if (mode === "first_frame" || mode === "first_last_frame") rows.push(`首帧图提示词：${shot.firstFramePrompt}`);
+  if (mode === "first_last_frame") {
+    rows.push(`尾帧图提示词：${shot.lastFramePrompt}`);
+    rows.push(`首尾帧过渡提示词：${shot.transitionPrompt}`);
+  }
+  if (mode === "split") rows.push(`拆镜建议：${shot.splitSuggestion}`);
+  rows.push(`负面提示词：${shot.negativePrompt}`);
+  return rows.join("\n");
+}
+
+function buildAllPromptText(promptPackage: PromptPackage, modeOverrides: Record<string, PromptMode>) {
+  return promptPackage.shots
+    .map((shot) => buildShotCopyText(shot, modeOverrides[shot.shotId] || shot.recommendedMode))
+    .join("\n\n---\n\n");
 }
 
 function ToolCards() {

@@ -200,6 +200,28 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
+  if (req.method === "POST" && req.url === "/api/prompts") {
+    try {
+      const body = await readJson(req);
+      let promptPackage;
+      if (process.env.GEMINI_API_KEY) {
+        try {
+          promptPackage = await buildVideoPromptsWithGemini(body);
+        } catch (error) {
+          const message = error instanceof Error ? error.message : "Gemini 提示词生成失败";
+          promptPackage = createFallbackPromptPackage(body, `Gemini 暂时不可用，当前提示词由本地分镜规则生成。原因：${message.slice(0, 120)}`);
+        }
+      } else {
+        promptPackage = createFallbackPromptPackage(body, "未检测到 GEMINI_API_KEY，当前提示词由本地分镜规则生成。");
+      }
+      writeJson(res, 200, promptPackage);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "提示词生成失败";
+      writeJson(res, 500, { error: message });
+    }
+    return;
+  }
+
   if (req.method === "POST" && req.url === "/api/assets/export") {
     try {
       const body = await readJson(req, {
@@ -614,6 +636,291 @@ function clampNumber(value, fallback) {
   const number = Number(value);
   if (!Number.isFinite(number)) return fallback;
   return Math.max(0, Math.min(100, Math.round(number)));
+}
+
+async function buildVideoPromptsWithGemini(input) {
+  const model = process.env.GEMINI_MODEL || "gemini-2.5-flash";
+  const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${encodeURIComponent(process.env.GEMINI_API_KEY)}`;
+  const prompt = buildVideoPromptsPrompt(input);
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), Number(process.env.GEMINI_TIMEOUT_MS || 160_000));
+  const response = await fetch(url, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    signal: controller.signal,
+    body: JSON.stringify({
+      contents: [{ role: "user", parts: [{ text: prompt }] }],
+      generationConfig: {
+        temperature: 0.25,
+        responseMimeType: "application/json",
+      },
+    }),
+  }).finally(() => clearTimeout(timeout));
+
+  if (!response.ok) {
+    const detail = await response.text();
+    throw new Error(`Gemini 提示词生成失败：${response.status} ${detail.slice(0, 400)}`);
+  }
+
+  const data = await response.json();
+  const text = data?.candidates?.[0]?.content?.parts?.map((part) => part.text || "").join("") || "";
+  if (!text.trim()) throw new Error("Gemini 未返回提示词内容。");
+  const parsed = JSON.parse(stripJsonFence(text));
+  return normalizePromptPackage(parsed, input, "gemini");
+}
+
+function buildVideoPromptsPrompt(input) {
+  const rawScript = String(input.scriptText || "");
+  const script =
+    rawScript.length > 24000
+      ? `${rawScript.slice(0, 20000)}\n\n【中间内容已省略，以下为结尾片段】\n${rawScript.slice(-4000)}`
+      : rawScript;
+  const platform = normalizePromptPlatform(input.platform);
+  return `
+你是 AI 真人短剧视频提示词执行 Agent。你的任务不是商业诊断，也不是资产清单；你的任务是把剧本拆成可执行视频镜头，并判断每个镜头应该用“全局文本生成 / 首帧驱动 / 首尾帧控制 / 拆镜方案”中的哪一种。
+
+目标平台：${platform}
+
+核心执行逻辑：
+1. 严格按剧本叙事顺序拆镜，不新增剧本不存在的情节。
+2. 每条镜头必须包含上一镜承接、角色站位、角色朝向、动作链、动作终态。
+3. 对话/对峙场景必须遵守 180 度视轴：同一场内左侧角色保持朝右，右侧角色保持朝左，不允许左右站位互换。
+4. 每条镜头只做一个核心动作。复杂动作必须拆成起势、动作结果、反应镜头。
+5. 高风险镜头优先建议首尾帧：打斗、推搡、抓手、拥抱、倒地、转身、追逐、法术、爆炸、光门、多人围攻、状态变化。
+6. 极高风险镜头不要硬写“一镜生成”，必须给拆镜建议。
+7. 全局文本生成适合：空镜、简单对话、普通走位、情绪推进。
+8. 首帧驱动适合：人物一致性要求高、动作简单、需要固定构图的镜头。
+9. 首尾帧控制适合：动作前后状态变化明显、复杂肢体/特效/转场、A 级样片关键镜头。
+10. 提示词必须可直接复制到视频平台，写可见画面，不写抽象心理。
+
+风险评分规则：
+- 0-30：低风险，推荐 text
+- 31-60：中风险，推荐 first_frame
+- 61-80：高风险，推荐 first_last_frame
+- 81-100：极高风险，推荐 split
+
+字段要求：
+- shotId 用 SHOT_01 格式。
+- duration 写“4秒/5秒”等。
+- recommendedMode 只能是 text / first_frame / first_last_frame / split。
+- riskReasons 写清为什么这样判断。
+- videoPrompt 必须包含：真人短剧质感、场景、承接上一镜、景别、运镜、角色站位、角色朝向、动作链、动作终态、光影、情绪。
+- firstFramePrompt 必须是首帧图片提示词，写“动作开始前”的稳定画面。
+- lastFramePrompt 必须是尾帧图片提示词，写“动作完成后”的稳定终态。
+- transitionPrompt 必须说明从首帧到尾帧怎么运动，要求同脸、同服装、同空间、同站位、不跳轴。
+- negativePrompt 必须包含：不要换脸、不要左右站位互换、不要人物穿模、不要多余手臂、不要手指畸形、不要动漫、不要文字水印、不要过暗看不清脸。
+
+剧本名称：${input.title || "未命名剧本"}
+
+剧本正文：
+${script || "用户未提供正文，请输出低置信度示例结构。"}
+
+只返回 JSON，不要 Markdown。JSON 结构必须完全如下：
+{
+  "title": "剧本名",
+  "summary": "一句话说明本次提示词拆解口径",
+  "platform": "${platform}",
+  "globalRules": ["全局规则1", "全局规则2", "全局规则3"],
+  "shots": [
+    {
+      "shotId": "SHOT_01",
+      "sequence": 1,
+      "scene": "场景名",
+      "duration": "4秒",
+      "shotSize": "中景/近景/特写/全景",
+      "cameraMove": "静止/缓推/跟移，写清方向",
+      "visualGoal": "这一镜要让观众看到什么",
+      "continuity": "承接上一镜或开篇状态",
+      "orientation": "角色朝向和左右站位",
+      "action": "动作链",
+      "finalState": "动作终态",
+      "emotion": "情绪",
+      "lighting": "光影",
+      "dialogue": "台词原文，无台词写无台词",
+      "recommendedMode": "text/first_frame/first_last_frame/split",
+      "riskScore": 0,
+      "riskReasons": ["原因1", "原因2"],
+      "videoPrompt": "可复制的视频正向提示词",
+      "firstFramePrompt": "首帧图提示词",
+      "lastFramePrompt": "尾帧图提示词",
+      "transitionPrompt": "首尾帧过渡视频提示词",
+      "negativePrompt": "负面提示词",
+      "splitSuggestion": "拆镜建议"
+    }
+  ]
+}
+`;
+}
+
+function normalizePromptPackage(pkg, input, source) {
+  const fallback = createFallbackPromptPackage(input, "");
+  const shots = normalizePromptShots(pkg.shots, fallback.shots).slice(0, 80);
+  return {
+    title: String(pkg.title || input.title || fallback.title || "未命名剧本"),
+    generatedAt: new Date().toLocaleString("zh-CN", { hour12: false }),
+    summary: String(pkg.summary || fallback.summary),
+    platform: normalizePromptPlatform(pkg.platform || input.platform),
+    source,
+    note: pkg.note || "",
+    globalRules: normalizeArray(pkg.globalRules, fallback.globalRules).slice(0, 8).map(String),
+    shots,
+  };
+}
+
+function normalizePromptShots(value, fallback) {
+  const rows = Array.isArray(value) && value.length ? value : fallback;
+  return rows.map((item, index) => {
+    const risk = scoreShotRisk(item);
+    const recommendedMode = normalizePromptMode(item.recommendedMode || risk.mode);
+    return {
+      shotId: String(item.shotId || `SHOT_${String(index + 1).padStart(2, "0")}`),
+      sequence: clampInt(item.sequence || index + 1, 1, 999, index + 1),
+      scene: String(item.scene || "核心冲突场"),
+      duration: String(item.duration || "4秒"),
+      shotSize: String(item.shotSize || "中景"),
+      cameraMove: String(item.cameraMove || "静止"),
+      visualGoal: String(item.visualGoal || item.description || "呈现当前剧情动作"),
+      continuity: String(item.continuity || (index === 0 ? "开篇镜头" : "承接上一镜动作终态")),
+      orientation: String(item.orientation || "主角画面左侧朝右；对手或目标画面右侧朝左"),
+      action: String(item.action || "完成一个清晰动作"),
+      finalState: String(item.finalState || "动作自然收住，人物站位保持稳定"),
+      emotion: String(item.emotion || "紧张克制"),
+      lighting: String(item.lighting || "真实中国短剧光影，面部清楚，背景轻微虚化"),
+      dialogue: String(item.dialogue || item.lines || "无台词"),
+      recommendedMode,
+      riskScore: clampNumber(item.riskScore, risk.score),
+      riskReasons: normalizeArray(item.riskReasons, risk.reasons).slice(0, 6).map(String),
+      videoPrompt: String(item.videoPrompt || buildDefaultVideoPrompt(item)),
+      firstFramePrompt: String(item.firstFramePrompt || buildDefaultFirstFramePrompt(item)),
+      lastFramePrompt: String(item.lastFramePrompt || buildDefaultLastFramePrompt(item)),
+      transitionPrompt: String(item.transitionPrompt || buildDefaultTransitionPrompt(item)),
+      negativePrompt: String(item.negativePrompt || defaultVideoNegativePrompt()),
+      splitSuggestion: String(item.splitSuggestion || "如生成不稳定，拆为起势镜头、动作结果镜头、反应镜头。"),
+    };
+  });
+}
+
+function scoreShotRisk(item) {
+  const text = [
+    item.visualGoal,
+    item.action,
+    item.videoPrompt,
+    item.firstFramePrompt,
+    item.lastFramePrompt,
+    item.dialogue,
+  ].filter(Boolean).join(" ");
+  let score = 18;
+  const reasons = [];
+  const tests = [
+    [/多人|三人|众人|群|围攻|群演|人群/, 15, "多人同框或群体压力"],
+    [/抓|抱|搂|推|拉扯|扭打|压住|扶起|刺穿|亲吻/, 24, "存在肢体接触或穿模风险"],
+    [/打|踢|拳|掌|撞|摔|倒地|跪下|起身|追逐|奔跑/, 22, "存在高幅度动作"],
+    [/转身|回头|穿越|从左到右|从右到左|冲向|后退/, 12, "存在朝向或位移变化"],
+    [/法术|爆炸|雷|火|光门|异象|飞剑|血雾|变身|坠落/, 24, "存在复杂特效"],
+    [/同时|一边|并且|随后.*然后|与此同时/, 10, "单镜动作信息偏多"],
+  ];
+  for (const [regex, weight, reason] of tests) {
+    if (regex.test(text)) {
+      score += weight;
+      reasons.push(reason);
+    }
+  }
+  score = Math.max(0, Math.min(100, score));
+  const mode = score >= 81 ? "split" : score >= 61 ? "first_last_frame" : score >= 31 ? "first_frame" : "text";
+  if (!reasons.length) reasons.push("动作简单，适合全局文本生成");
+  return { score, mode, reasons };
+}
+
+function normalizePromptMode(value) {
+  const raw = String(value || "").toLowerCase();
+  if (raw.includes("split") || raw.includes("拆")) return "split";
+  if (raw.includes("first_last") || raw.includes("首尾") || raw.includes("尾帧")) return "first_last_frame";
+  if (raw.includes("first") || raw.includes("首帧")) return "first_frame";
+  return "text";
+}
+
+function normalizePromptPlatform(value) {
+  const raw = String(value || "").toLowerCase();
+  if (raw.includes("kling") || raw.includes("可灵")) return "kling";
+  if (raw.includes("seedance")) return "seedance";
+  if (raw.includes("runway")) return "runway";
+  return "universal";
+}
+
+function buildDefaultVideoPrompt(item) {
+  return `真人短剧质感，${item.scene || "核心冲突场"}，${item.continuity || "承接上一镜"}。${item.visualGoal || "呈现剧情动作"}。镜头为${item.shotSize || "中景"}，${item.cameraMove || "静止"}。${item.orientation || "保持左右站位和180度视轴"}。动作：${item.action || "完成一个清晰动作"}。动作终态：${item.finalState || "动作自然收住"}。${item.lighting || "真实光影，面部清楚"}。`;
+}
+
+function buildDefaultFirstFramePrompt(item) {
+  return `竖屏9:16真人短剧首帧图，${item.scene || "核心冲突场"}，${item.visualGoal || "剧情开始前稳定画面"}。${item.orientation || "角色站位清楚"}。动作开始前，人物处于稳定姿态，真实中国短剧质感，面部清楚，无文字无水印。`;
+}
+
+function buildDefaultLastFramePrompt(item) {
+  return `竖屏9:16真人短剧尾帧图，${item.scene || "核心冲突场"}，同一人物、同一服装、同一空间。${item.finalState || "动作完成后自然停住"}。左右站位不变，真实光影，面部清楚，无文字无水印。`;
+}
+
+function buildDefaultTransitionPrompt(item) {
+  return `以首帧为起点、尾帧为终点，人物只完成一个核心动作：${item.action || "清晰动作"}。保持同脸、同服装、同空间、同站位，不跳轴，不换脸。`;
+}
+
+function defaultVideoNegativePrompt() {
+  return "不要动漫，不要插画，不要换脸，不要左右站位互换，不要人物穿模，不要多人融合，不要多余手臂，不要手指畸形，不要文字水印，不要过暗看不清脸，不要镜头主体突然消失。";
+}
+
+function createFallbackPromptPackage(input, note) {
+  const title = input.title || "未命名剧本";
+  const script = String(input.scriptText || "");
+  const platform = normalizePromptPlatform(input.platform);
+  const chunks = splitScriptForFallbackShots(script).slice(0, 10);
+  const shots = chunks.map((chunk, index) => {
+    const scene = chunk.match(/(?:在|到|进入|来到|冲进)([\u4e00-\u9fa5]{2,10})(?:，|。|里|中)/)?.[1] || (index === 0 ? "核心冲突场" : `场景${index + 1}`);
+    const dialogue = chunk.match(/「([^」]+)」|“([^”]+)”|"([^"]+)"/)?.[0] || "无台词";
+    const base = {
+      shotId: `SHOT_${String(index + 1).padStart(2, "0")}`,
+      sequence: index + 1,
+      scene,
+      duration: dialogue === "无台词" ? "4秒" : "5秒",
+      shotSize: index === 0 ? "中景" : "中近景",
+      cameraMove: "静止或轻微缓推",
+      visualGoal: chunk.replace(/\s+/g, " ").slice(0, 120) || "呈现核心冲突动作",
+      continuity: index === 0 ? "开篇镜头" : "承接上一镜动作终态，人物位置不跳变",
+      orientation: "主角固定画面左侧，3/4正面朝右；对手或目标固定画面右侧，3/4正面朝左",
+      action: "从稳定姿态开始，只完成一个核心动作，动作结束后自然停住",
+      finalState: "动作完成后角色站位保持稳定，情绪停在下一镜可承接的状态",
+      emotion: "压迫、克制、反击期待",
+      lighting: "真实中国真人短剧光影，面部清楚，背景轻微虚化",
+      dialogue,
+    };
+    const risk = scoreShotRisk(base);
+    return normalizePromptShots([{ ...base, recommendedMode: risk.mode, riskScore: risk.score, riskReasons: risk.reasons }], [])[0];
+  });
+  return {
+    title,
+    generatedAt: new Date().toLocaleString("zh-CN", { hour12: false }),
+    summary: "按视频生成执行口径拆分镜头，并给出全局文本、首帧、首尾帧或拆镜建议。",
+    platform,
+    source: "local",
+    note,
+    globalRules: [
+      "同一场戏保持180度视轴，左右站位不互换。",
+      "每个镜头只完成一个核心动作。",
+      "复杂肢体接触、打斗、法术和状态变化优先首尾帧。",
+      "极高风险镜头先拆镜，不硬抽。",
+    ],
+    shots,
+  };
+}
+
+function splitScriptForFallbackShots(script) {
+  const byScene = String(script || "")
+    .split(/\n(?=第[一二三四五六七八九十0-9]+[场幕集]|场景|△|- )/)
+    .map((part) => part.trim())
+    .filter(Boolean);
+  if (byScene.length) return byScene;
+  return String(script || "主角进入核心冲突场。")
+    .split(/(?<=[。！？!?])/)
+    .map((part) => part.trim())
+    .filter(Boolean);
 }
 
 async function buildAssetsWithGemini(input) {
