@@ -652,6 +652,8 @@ async function buildVideoPromptsWithGemini(input) {
       contents: [{ role: "user", parts: [{ text: prompt }] }],
       generationConfig: {
         temperature: 0.25,
+        topP: 0.9,
+        maxOutputTokens: 32768,
         responseMimeType: "application/json",
       },
     }),
@@ -676,22 +678,39 @@ function buildVideoPromptsPrompt(input) {
       ? `${rawScript.slice(0, 20000)}\n\n【中间内容已省略，以下为结尾片段】\n${rawScript.slice(-4000)}`
       : rawScript;
   const platform = normalizePromptPlatform(input.platform);
+  const estimatedShotCount = estimatePromptShotCount(script);
   return `
 你是 AI 真人短剧视频提示词执行 Agent。你的任务不是商业诊断，也不是资产清单；你的任务是把剧本拆成可执行视频镜头，并判断每个镜头应该用“全局文本生成 / 首帧驱动 / 首尾帧控制 / 拆镜方案”中的哪一种。
 
 目标平台：${platform}
+本次剧本建议镜头数：${estimatedShotCount.min}-${estimatedShotCount.max} 条。除非剧本极短，shots 数组不得少于 ${estimatedShotCount.min} 条。
 
 核心执行逻辑：
 1. 严格按剧本叙事顺序拆镜，不新增剧本不存在的情节。
-2. 每条镜头必须包含上一镜承接、角色站位、角色朝向、动作链、动作终态。
-3. 对话/对峙场景必须遵守 180 度视轴：同一场内左侧角色保持朝右，右侧角色保持朝左，不允许左右站位互换。
-4. 每条镜头只做一个核心动作。复杂动作必须拆成起势、动作结果、反应镜头。
-5. 高风险镜头优先建议首尾帧：打斗、推搡、抓手、拥抱、倒地、转身、追逐、法术、爆炸、光门、多人围攻、状态变化。
-6. 极高风险镜头不要硬写“一镜生成”，必须给拆镜建议。
-7. 全局文本生成适合：空镜、简单对话、普通走位、情绪推进。
-8. 首帧驱动适合：人物一致性要求高、动作简单、需要固定构图的镜头。
-9. 首尾帧控制适合：动作前后状态变化明显、复杂肢体/特效/转场、A 级样片关键镜头。
-10. 提示词必须可直接复制到视频平台，写可见画面，不写抽象心理。
+2. 先在脑内建立空间锁定表：同一场景内谁在画面左、谁在画面右、谁朝左/朝右、核心道具/怪物/车辆/摊位在哪个方向。这个锁定必须贯穿所有镜头。
+3. 每条镜头必须包含上一镜承接、角色站位、角色朝向、动作链、动作终态。
+4. 对话/对峙场景必须遵守 180 度视轴：同一场内左侧角色保持朝右，右侧角色保持朝左，不允许左右站位互换。
+5. 每条镜头只做一个核心动作。复杂动作必须拆成起势、动作结果、反应镜头。
+6. 不得把一整场戏压缩成一个镜头。场景内只要出现“主体切换、动作节点、台词节点、景别变化、空间变化、结果反馈”，就必须新起镜头。
+7. 高风险镜头优先建议首尾帧：打斗、推搡、抓手、拥抱、倒地、转身、追逐、法术、爆炸、光门、多人围攻、状态变化。
+8. 极高风险镜头不要硬写“一镜生成”，必须给拆镜建议，并且拆镜建议要写成 2-4 个可执行子镜头。
+9. 全局文本生成适合：空镜、简单对话、普通走位、情绪推进。
+10. 首帧驱动适合：人物一致性要求高、动作简单、需要固定构图的镜头。
+11. 首尾帧控制适合：动作前后状态变化明显、复杂肢体/特效/转场、A 级样片关键镜头。
+12. 提示词必须可直接复制到视频平台，写可见画面，不写抽象心理。
+
+拆镜粒度标准：
+- 每 50-100 字剧本通常对应 1-2 个镜头。
+- 无台词动作镜头 3-5 秒；复杂动作拆短，不超过 6 秒。
+- 一句重要台词通常单独成镜，台词必须原文保留。
+- 动作顺序必须拆成“建立空间 -> 威胁/起势 -> 撞击/变化 -> 结果/反应 -> 台词/宣言”。
+- 魔法、恶龙、能量罩、刀气、倒飞、推搡、递刀这类内容不可合并成一句笼统提示词。
+
+输出质量标准：
+- videoPrompt 要像导演给视频平台的执行描述，不能只写“某某做某事”。
+- firstFramePrompt/lastFramePrompt 必须能单独拿去生图，画面稳定、构图明确、角色位置清楚。
+- splitSuggestion 必须是真正可复制的子镜头方案，不能只写“建议拆镜”。
+- 负面提示词要结合该镜头风险补充，不只给通用模板。
 
 风险评分规则：
 - 0-30：低风险，推荐 text
@@ -704,6 +723,10 @@ function buildVideoPromptsPrompt(input) {
 - duration 写“4秒/5秒”等。
 - recommendedMode 只能是 text / first_frame / first_last_frame / split。
 - riskReasons 写清为什么这样判断。
+- continuity 必须写“开篇”或“承接上镜：……”，不能空泛。
+- orientation 必须具体到每个角色/主体，例如“杨轩画面左侧3/4正面朝右；天奇画面右侧朝左；恶龙位于上方远景朝下”。
+- action 必须写连续物理动作链，并用箭头连接，例如“抬手蓄势→刀气横切→身体落回礁石”。
+- finalState 必须写清动作完成后的稳定画面，方便尾帧生成。
 - videoPrompt 必须包含：真人短剧质感、场景、承接上一镜、景别、运镜、角色站位、角色朝向、动作链、动作终态、光影、情绪。
 - firstFramePrompt 必须是首帧图片提示词，写“动作开始前”的稳定画面。
 - lastFramePrompt 必须是尾帧图片提示词，写“动作完成后”的稳定终态。
@@ -752,16 +775,34 @@ ${script || "用户未提供正文，请输出低置信度示例结构。"}
 `;
 }
 
+function estimatePromptShotCount(script) {
+  const length = String(script || "").replace(/\s+/g, "").length;
+  const dialogueCount = (String(script || "").match(/[“「][^”」]{2,80}[”」]/g) || []).length;
+  const riskCount = (String(script || "").match(/恶龙|能量罩|刀气|倒飞|打碎|推搡|抓|抱|递|打|轰|爆|法术|追|倒地|吐血|飞来|劈下/g) || []).length;
+  const base = Math.ceil(length / 85) + Math.ceil(dialogueCount * 0.8) + Math.ceil(riskCount * 0.45);
+  return {
+    min: Math.max(8, Math.min(14, base)),
+    max: Math.max(12, Math.min(24, base + 6)),
+  };
+}
+
 function normalizePromptPackage(pkg, input, source) {
   const fallback = createFallbackPromptPackage(input, "");
-  const shots = normalizePromptShots(pkg.shots, fallback.shots).slice(0, 80);
+  const minimum = estimatePromptShotCount(input.scriptText || "").min;
+  let note = pkg.note || "";
+  let shots = normalizePromptShots(pkg.shots, fallback.shots).slice(0, 80);
+  if (shots.length < minimum && fallback.shots.length > shots.length) {
+    shots = fallback.shots.slice(0, Math.max(minimum, Math.min(fallback.shots.length, 18)));
+    note = `${note ? `${note} ` : ""}Gemini 返回镜头数偏少，已按本地 skill 分镜规则补足到执行级镜头。`;
+    source = source === "gemini" ? "hybrid" : source;
+  }
   return {
     title: String(pkg.title || input.title || fallback.title || "未命名剧本"),
     generatedAt: new Date().toLocaleString("zh-CN", { hour12: false }),
     summary: String(pkg.summary || fallback.summary),
     platform: normalizePromptPlatform(pkg.platform || input.platform),
     source,
-    note: pkg.note || "",
+    note,
     globalRules: normalizeArray(pkg.globalRules, fallback.globalRules).slice(0, 8).map(String),
     shots,
   };
@@ -814,9 +855,9 @@ function scoreShotRisk(item) {
   const tests = [
     [/多人|三人|众人|群|围攻|群演|人群/, 15, "多人同框或群体压力"],
     [/抓|抱|搂|推|拉扯|扭打|压住|扶起|刺穿|亲吻/, 24, "存在肢体接触或穿模风险"],
-    [/打|踢|拳|掌|撞|摔|倒地|跪下|起身|追逐|奔跑/, 22, "存在高幅度动作"],
+    [/打|踢|拳|掌|撞|摔|倒地|跪下|起身|追逐|奔跑|俯冲|横扫|劈下/, 30, "存在高幅度动作"],
     [/转身|回头|穿越|从左到右|从右到左|冲向|后退/, 12, "存在朝向或位移变化"],
-    [/法术|爆炸|雷|火|光门|异象|飞剑|血雾|变身|坠落/, 24, "存在复杂特效"],
+    [/法术|爆炸|雷|火|光门|异象|飞剑|血雾|变身|坠落|恶龙|龙焰|刀气|能量罩|光罩|飞来|斩龙/, 45, "存在复杂特效"],
     [/同时|一边|并且|随后.*然后|与此同时/, 10, "单镜动作信息偏多"],
   ];
   for (const [regex, weight, reason] of tests) {
@@ -867,32 +908,53 @@ function defaultVideoNegativePrompt() {
   return "不要动漫，不要插画，不要换脸，不要左右站位互换，不要人物穿模，不要多人融合，不要多余手臂，不要手指畸形，不要文字水印，不要过暗看不清脸，不要镜头主体突然消失。";
 }
 
+function extractFallbackDialogue(text) {
+  const cleaned = String(text || "").replace(/^(人物|角色|时间|地点)[:：][^；]+；?/, "").trim();
+  const quoted = cleaned.match(/「([^」]+)」|“([^”]+)”|"([^"]+)"/)?.[0];
+  if (quoted) return quoted;
+  const colon = cleaned.match(/^([\u4e00-\u9fa5A-Za-z0-9·・]+)(?:（[^）]+）)?[:：]\s*(.+)$/);
+  if (!colon) return "无台词";
+  return `${colon[1]}：${colon[2].trim()}`;
+}
+
 function createFallbackPromptPackage(input, note) {
   const title = input.title || "未命名剧本";
   const script = String(input.scriptText || "");
   const platform = normalizePromptPlatform(input.platform);
-  const chunks = splitScriptForFallbackShots(script).slice(0, 10);
+  const fallbackLimit = estimatePromptShotCount(script).max;
+  const chunks = splitScriptForFallbackShots(script).slice(0, fallbackLimit);
   const shots = chunks.map((chunk, index) => {
-    const scene = chunk.match(/(?:在|到|进入|来到|冲进)([\u4e00-\u9fa5]{2,10})(?:，|。|里|中)/)?.[1] || (index === 0 ? "核心冲突场" : `场景${index + 1}`);
-    const dialogue = chunk.match(/「([^」]+)」|“([^”]+)”|"([^"]+)"/)?.[0] || "无台词";
+    const scene = chunk.scene || chunk.text?.match(/【场景：([^】]+)】/)?.[1] || chunk.match?.(/【场景：([^】]+)】/)?.[1] || (index === 0 ? "核心冲突场" : `场景${index + 1}`);
+    const text = String(chunk.text || chunk).replace(/【场景：[^】]+】/g, "").trim();
+    const dialogue = extractFallbackDialogue(text);
+    const visualGoal = summarizeBeatToGoal(text, scene);
     const base = {
       shotId: `SHOT_${String(index + 1).padStart(2, "0")}`,
       sequence: index + 1,
       scene,
       duration: dialogue === "无台词" ? "4秒" : "5秒",
-      shotSize: index === 0 ? "中景" : "中近景",
-      cameraMove: "静止或轻微缓推",
-      visualGoal: chunk.replace(/\s+/g, " ").slice(0, 120) || "呈现核心冲突动作",
-      continuity: index === 0 ? "开篇镜头" : "承接上一镜动作终态，人物位置不跳变",
-      orientation: "主角固定画面左侧，3/4正面朝右；对手或目标固定画面右侧，3/4正面朝左",
-      action: "从稳定姿态开始，只完成一个核心动作，动作结束后自然停住",
-      finalState: "动作完成后角色站位保持稳定，情绪停在下一镜可承接的状态",
-      emotion: "压迫、克制、反击期待",
-      lighting: "真实中国真人短剧光影，面部清楚，背景轻微虚化",
+      shotSize: pickFallbackShotSize(text, index),
+      cameraMove: pickFallbackCameraMove(text, index),
+      visualGoal,
+      continuity: index === 0 ? "开篇镜头，先建立场景和主要威胁" : "承接上镜动作终态，人物位置、朝向和光影不跳变",
+      orientation: buildFallbackOrientation(text, scene),
+      action: buildFallbackAction(text, index),
+      finalState: buildFallbackFinalState(text),
+      emotion: pickFallbackEmotion(text),
+      lighting: buildFallbackLighting(scene, text),
       dialogue,
     };
     const risk = scoreShotRisk(base);
-    return normalizePromptShots([{ ...base, recommendedMode: risk.mode, riskScore: risk.score, riskReasons: risk.reasons }], [])[0];
+    const normalized = normalizePromptShots([{ ...base, recommendedMode: risk.mode, riskScore: risk.score, riskReasons: risk.reasons }], [])[0];
+    return {
+      ...normalized,
+      videoPrompt: buildDetailedFallbackVideoPrompt(normalized),
+      firstFramePrompt: buildDetailedFallbackFirstFramePrompt(normalized),
+      lastFramePrompt: buildDetailedFallbackLastFramePrompt(normalized),
+      transitionPrompt: buildDetailedFallbackTransitionPrompt(normalized),
+      splitSuggestion: buildDetailedFallbackSplitSuggestion(normalized),
+      negativePrompt: buildDetailedFallbackNegativePrompt(normalized),
+    };
   });
   return {
     title,
@@ -911,16 +973,193 @@ function createFallbackPromptPackage(input, note) {
   };
 }
 
+function summarizeBeatToGoal(text, scene) {
+  const compact = String(text || "").replace(/\s+/g, " ").replace(/^(人物|角色|时间|地点)[:：][^；]+；?/, "").trim();
+  if (/乌云|海面|秘境|远处|街道|出租车/.test(compact) && !/[“「]/.test(compact) && !/杨轩|罗珊|推搡/.test(compact)) return `${scene}建立空间与威胁关系`;
+  if (/龙焰|轰向|能量罩|防御/.test(compact)) return "恶龙吐息压向斩龙小队防线";
+  if (/俯冲|神龙摆尾|光罩|打碎|倒飞|吐血/.test(compact)) return "恶龙击碎光罩，小队被重击倒飞";
+  if (/刀气|屠龙刀|飞来/.test(compact)) return "杨轩以刀气切开危机并登场";
+  if (/劈下|龙头|斩龙/.test(compact)) return "杨轩完成斩龙结果兑现";
+  if (/交给|局长|不做|灭门之仇/.test(compact)) return "杨轩交还屠龙刀并宣布复仇目标";
+  if (/罗珊|光头|推搡|小龙虾/.test(compact)) return "杨轩发现大嫂罗珊被街头欺压";
+  if (/^[\u4e00-\u9fa5A-Za-z0-9·・]+(?:（[^）]+）)?[:：]/.test(compact)) return compact.replace(/^[^:：]+[:：]\s*/, "").slice(0, 42);
+  return compact.slice(0, 42) || "呈现当前剧情动作";
+}
+
+function pickFallbackShotSize(text, index) {
+  if (index === 0 || /乌云|海面|街道|高楼|出租车/.test(text)) return "远景";
+  if (/眼|手|屠龙刀|龙头|能量罩|表情|震惊/.test(text)) return "特写";
+  if (/飞来|劈下|倒飞|推搡|走入|停车/.test(text)) return "全景";
+  if (/[“「]/.test(text) || /^[\u4e00-\u9fa5A-Za-z0-9·・]+(?:（[^）]+）)?[:：]/.test(text)) return "近景";
+  return "中景";
+}
+
+function pickFallbackCameraMove(text, index) {
+  if (index === 0) return "缓慢推进，远景压到全景";
+  if (/飞来|俯冲|劈下|冲|停车/.test(text)) return "跟移，跟随主体运动方向";
+  if (/倒飞|打碎|龙头|结果/.test(text)) return "快速切入后短暂停住";
+  if (/看着|发现|震惊/.test(text)) return "缓推至近景";
+  if (/[“「]/.test(text) || /^[\u4e00-\u9fa5A-Za-z0-9·・]+(?:（[^）]+）)?[:：]/.test(text)) return "静止正反打";
+  return "静止或轻微缓推";
+}
+
+function buildFallbackOrientation(text, scene) {
+  if (/东海|秘境|恶龙|斩龙|能量罩|屠龙/.test(`${scene} ${text}`)) {
+    return "斩龙小队固定画面左下方朝右上防御；恶龙固定画面右上方朝左下俯冲；杨轩登场后位于画面左侧或中轴偏左，3/4正面朝右上；天奇画面右侧朝左看向杨轩。";
+  }
+  if (/街|出租车|罗珊|光头|小龙虾/.test(`${scene} ${text}`)) {
+    return "杨轩在车内或画面左侧朝右看向路边；罗珊固定画面左中侧朝右；光头固定画面右侧朝左压迫罗珊；两个混混在光头后方虚化。";
+  }
+  return "主角固定画面左侧，3/4正面朝右；对手或目标固定画面右侧，3/4正面朝左。";
+}
+
+function buildFallbackAction(text, index) {
+  const compact = String(text || "").replace(/\s+/g, " ");
+  if (/龙焰|轰向|能量罩/.test(compact)) return "恶龙张口蓄火→岩浆状龙焰压向岸边→斩龙小队抬手撑起蓝色能量罩｜朝向：恶龙-朝左下; 小队-朝右上";
+  if (/俯冲|神龙摆尾|光罩|打碎|倒飞|吐血/.test(compact)) return "恶龙俯冲压低→龙尾横扫光罩→斩龙小队向后倒飞落地｜朝向：恶龙-朝左下; 小队-朝右上后仰";
+  if (/刀气|飞来|屠龙刀/.test(compact)) return "远处刀气切开海浪→杨轩握刀破风飞来→落在小队前方｜朝向：杨轩-3/4正面朝右";
+  if (/孽畜|伤人/.test(compact)) return "杨轩站稳后抬眼看向恶龙→屠龙刀斜垂在身侧→开口怒斥｜朝向：杨轩-3/4正面朝右上; 恶龙-朝左下";
+  if (/劈下|龙头|斩龙/.test(compact)) return "杨轩腾空举刀→刀气竖劈落下→恶龙头颅与身躯分离坠入海面｜朝向：杨轩-朝右下; 恶龙-朝左";
+  if (/恭喜|局长/.test(compact)) return "天奇扶着伤口上前半步→抬头看向杨轩→压住激动开口｜朝向：天奇-朝左; 杨轩-朝右";
+  if (/交给|屠龙刀|不做/.test(compact)) return "杨轩把屠龙刀柄递向天奇→天奇双手接住→杨轩松手转身｜朝向：杨轩-朝右转背; 天奇-朝左";
+  if (/出租车|高楼|回家/.test(compact)) return "出租车穿过西海城街道→杨轩隔窗看向高楼→手指轻压车窗边缘｜朝向：杨轩-正侧面朝右";
+  if (/罗珊|光头|推搡/.test(compact)) return "光头抬手推搡罗珊肩膀→罗珊踉跄扶住摊位→杨轩在车内猛然转头看见｜朝向：罗珊-朝右; 光头-朝左; 杨轩-朝右";
+  if (/停车|杀意/.test(compact)) return "杨轩眼神收冷→身体前倾→低声命令司机停车｜朝向：杨轩-3/4正面朝右";
+  return `${index === 0 ? "建立空间" : "承接上镜"}→${compact.slice(0, 42)}→动作自然收住｜朝向：主角-3/4正面朝右`;
+}
+
+function buildFallbackFinalState(text) {
+  if (/倒飞|吐血/.test(text)) return "小队成员分散倒在礁石上，蓝色能量碎片消散，恶龙仍在上方压迫。";
+  if (/飞来|刀气/.test(text)) return "杨轩稳定落在小队前方，刀尖朝下，海浪被刀气分开。";
+  if (/劈下|斩龙|龙头/.test(text)) return "恶龙头颅坠落，海面激起水雾，杨轩悬停或落地收刀。";
+  if (/交给|屠龙刀/.test(text)) return "屠龙刀已到天奇手中，杨轩背影转向离开方向。";
+  if (/推搡|罗珊/.test(text)) return "罗珊扶住摊位勉强站稳，光头仍逼近，杨轩视线锁定二人。";
+  return "动作完成后主体停在稳定构图中，下一镜可直接承接。";
+}
+
+function pickFallbackEmotion(text) {
+  if (/恶龙|龙焰|能量罩|倒飞/.test(text)) return "压迫、危急";
+  if (/杨轩|刀气|斩龙|孽畜/.test(text)) return "冷厉、强势";
+  if (/灭门|不做|清算/.test(text)) return "决绝、复仇感";
+  if (/罗珊|光头|推搡/.test(text)) return "愤怒、保护欲";
+  return "紧张克制";
+}
+
+function buildFallbackLighting(scene, text) {
+  if (/东海|秘境|恶龙|斩龙/.test(`${scene} ${text}`)) return "顶部长云压暗，冷蓝侧光勾出人物轮廓，龙焰提供橙红反光，海面高反差。";
+  if (/街|出租车|罗珊|光头/.test(`${scene} ${text}`)) return "白天街道自然侧光，店招和车窗反射补光，人物面部清楚，背景轻微虚化。";
+  return "真实中国真人短剧光影，主光从侧前方打亮面部，背景压低但不黑。";
+}
+
+function buildDetailedFallbackVideoPrompt(shot) {
+  return `真人短剧质感，${shot.scene}。${shot.continuity}。镜头目标：${shot.visualGoal}。景别：${shot.shotSize}；运镜：${shot.cameraMove}。空间与朝向锁定：${shot.orientation}。动作链：${shot.action}。动作终态：${shot.finalState}。光影：${shot.lighting}。情绪：${shot.emotion}。${shot.dialogue !== "无台词" ? `台词原文：${shot.dialogue}。` : "无台词。"}`;
+}
+
+function buildDetailedFallbackFirstFramePrompt(shot) {
+  return `竖屏9:16真人短剧首帧图，${shot.scene}，${shot.visualGoal}。动作开始前的稳定瞬间，${shot.orientation}。人物服装、脸型和站位清楚，前景/中景/背景有空间层次，${shot.lighting}，无文字无水印。`;
+}
+
+function buildDetailedFallbackLastFramePrompt(shot) {
+  return `竖屏9:16真人短剧尾帧图，${shot.scene}，承接同一人物、同一服装、同一空间和同一视轴。动作完成后的稳定终态：${shot.finalState}。左右站位不互换，主体面部清楚，${shot.lighting}，无文字无水印。`;
+}
+
+function buildDetailedFallbackTransitionPrompt(shot) {
+  return `以首帧为起点、尾帧为终点，只完成这一条动作链：${shot.action}。全程保持同脸、同服装、同空间、同站位和180度视轴；动作前0.5秒保持稳定，动作完成后0.5秒自然收住，不新增人物，不跳轴。`;
+}
+
+function buildDetailedFallbackSplitSuggestion(shot) {
+  return `拆分为：1. 首帧建立空间和站位：${shot.orientation}；2. 动作起势：${shot.action.split("→")[0] || shot.visualGoal}；3. 动作结果：${shot.finalState}；4. 如有台词或反应，单独补一个近景反应镜头。`;
+}
+
+function buildDetailedFallbackNegativePrompt(shot) {
+  const extra = shot.riskScore >= 80 ? "不要一镜完成复杂碰撞，不要多人融合，不要特效遮脸，不要主体消失。" : "";
+  return `${defaultVideoNegativePrompt()} ${extra}不要错误朝向，不要恶龙/人物比例忽大忽小，不要肢体穿模，不要把台词生成成画面文字。`.trim();
+}
+
 function splitScriptForFallbackShots(script) {
-  const byScene = String(script || "")
-    .split(/\n(?=第[一二三四五六七八九十0-9]+[场幕集]|场景|△|- )/)
+  const lines = String(script || "主角进入核心冲突场。")
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter(Boolean);
+  const shots = [];
+  let currentScene = "核心冲突场";
+  let carry = "";
+
+  for (const line of lines) {
+    if (/^第[一二三四五六七八九十0-9]+集$/.test(line)) continue;
+    if (/^(第[一二三四五六七八九十0-9]+[集幕场]|场景[一二三四五六七八九十0-9]*|[一二三四五六七八九十0-9]+[、.．])/.test(line)) {
+      const sceneName = line.replace(/^第?[一二三四五六七八九十0-9]+[集幕场]?[、.．：:\s]*/, "").replace(/^[场景一二三四五六七八九十0-9：:\s]+/, "").trim();
+      if (sceneName && sceneName.length <= 30) currentScene = sceneName;
+      continue;
+    }
+    if (/^[\u4e00-\u9fa5A-Za-z0-9·・\s]{2,24}\s+(日|夜|晨|昏)\s+(内|外)$/.test(line)) {
+      currentScene = line;
+      continue;
+    }
+    if (/^(人物|角色|时间|地点)[:：]/.test(line)) {
+      carry = `${carry} ${line}`.trim();
+      continue;
+    }
+
+    const parts = splitLineIntoVisualBeats(line);
+    for (const part of parts) {
+      const text = [carry, part].filter(Boolean).join("；").trim();
+      carry = "";
+      if (text) shots.push({ scene: currentScene, text: `【场景：${currentScene}】${text}` });
+    }
+  }
+
+  if (!shots.length) {
+    return String(script || "主角进入核心冲突场。")
+      .split(/(?<=[。！？!?])/)
+      .map((part) => part.trim())
+      .filter(Boolean)
+      .map((text) => ({ scene: currentScene, text: `【场景：${currentScene}】${text}` }));
+  }
+
+  return mergeTinyFallbackBeats(shots);
+}
+
+function splitLineIntoVisualBeats(line) {
+  const raw = String(line || "").replace(/^△\s*/, "").trim();
+  if (!raw) return [];
+  if (/^【字幕[:：]/.test(raw)) return [];
+  if (/[“「][^”」]{2,80}[”」]/.test(raw)) return [raw];
+  if (/^[\u4e00-\u9fa5A-Za-z0-9·・]+(?:（[^）]+）)?[:：]/.test(raw)) return [raw];
+  const firstPass = raw
+    .split(/(?<=[。！？!?；;])/)
     .map((part) => part.trim())
     .filter(Boolean);
-  if (byScene.length) return byScene;
-  return String(script || "主角进入核心冲突场。")
-    .split(/(?<=[。！？!?])/)
-    .map((part) => part.trim())
-    .filter(Boolean);
+  const source = firstPass.length > 1 ? firstPass : [raw];
+  const result = [];
+  for (const part of source) {
+    if (part.length <= 70) {
+      result.push(part);
+      continue;
+    }
+    const commaParts = part
+      .split(/(?<=，|,)(?=.*(?:恶龙|杨轩|天奇|罗珊|光头|小队|能量罩|刀气|屠龙刀|推搡|倒飞|劈下|交给|停车))/)
+      .map((piece) => piece.trim())
+      .filter(Boolean);
+    result.push(...(commaParts.length > 1 ? commaParts : [part]));
+  }
+  return result;
+}
+
+function mergeTinyFallbackBeats(beats) {
+  const merged = [];
+  for (const beat of beats) {
+    const last = merged[merged.length - 1];
+    const text = String(beat.text || "");
+    const isDialogue = /[“「][^”」]+[”」]/.test(text);
+    const isRisky = /恶龙|能量罩|刀气|倒飞|打碎|推搡|抓|抱|递|打|轰|爆|法术|追|倒地|吐血|飞来|劈下/.test(text);
+    if (last && last.scene === beat.scene && text.length < 18 && !isDialogue && !isRisky) {
+      last.text = `${last.text} ${text}`;
+    } else {
+      merged.push({ ...beat });
+    }
+  }
+  return merged;
 }
 
 async function buildAssetsWithGemini(input) {
